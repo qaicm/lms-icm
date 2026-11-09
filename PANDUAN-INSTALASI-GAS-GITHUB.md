@@ -13,7 +13,7 @@ Panduan ini ditulis untuk pemula: tidak perlu pengalaman Git, GitHub, atau pemro
 4. [BAGIAN B — Menyiapkan frontend di komputer](#bagian-b--menyiapkan-frontend-di-komputer)
 5. [BAGIAN C — Mengunggah frontend ke GitHub Pages](#bagian-c--mengunggah-frontend-ke-github-pages)
 6. [BAGIAN D — Uji coba pertama](#bagian-d--uji-coba-pertama)
-7. [BAGIAN E — Persiapan sebelum dipakai resmi](#bagian-e--persiapan-sebelum-dipakai-resmi)
+7. [BAGIAN E — Persiapan sebelum dipakai resmi](#bagian-e--persiapan-sebelum-dipakai-resmi) (termasuk menghapus contoh kerja guru)
 8. [BAGIAN F — Cara memperbarui aplikasi](#bagian-f--cara-memperbarui-aplikasi)
 9. [BAGIAN G — Opsional: Login Google, embed Blogger, domain sendiri](#bagian-g--opsional)
 10. [Pemecahan masalah](#pemecahan-masalah)
@@ -371,9 +371,29 @@ Masuk sebagai **Super Admin** (`admin@icm.sch.id`), lalu:
 3. **Nonaktifkan** akun demo yang tidak dipakai (centang → *Nonaktifkan*), atau **Reset Password** jika akunnya diteruskan.
 4. Ganti kata sandi akun **admin** sendiri di *Profil & Akun*.
 5. **Tanda tangan pimpinan:** pimpinan mengunggah spesimen (PNG/JPG) di *Profil & TTD*, atau Super Admin di kartu *Tanda Tangan Digital*. Berkas TTD disimpan di folder Drive terbatas dan **tidak pernah** dikirim ke browser.
-6. Masuk sebagai **QA** → **Master Data** → periksa *Tahun & Term* (aktifkan term berjalan), Mata Pelajaran, Tingkat Kelas, ICM Value, Sequence of Teaching, **Alokasi Sesi (Period)**, Pilihan Durasi.
-7. (Opsional) Hapus data contoh di sheet `Chapters`, `SubChapters`, `LearningObjectives`, `LessonPlans` (beserta sheet `LessonPlan…`), `Approvals`, `Attachments` — **hapus baris data saja, jangan baris judul (baris 1)**. Lakukan sebelum guru mulai mengisi.
+6. Masuk sebagai **QA** → **Master Data** → periksa *Tahun & Term* (aktifkan term berjalan), Mata Pelajaran, Tingkat Kelas, ICM Value, Sequence of Teaching, **Period per Mapel** (period/minggu tiap mapel × kelas), **minggu efektif** term, Alokasi Sesi (Period), Pilihan Durasi.
+7. **Hapus contoh kerja guru** (chapter, lesson plan, persetujuan, lampiran contoh) sebelum guru mulai mengisi — lihat **[E1](#e1-menghapus-contoh-kerja-guru)**. Jangan menghapus baris langsung di spreadsheet.
 8. Bagikan alamat `https://USERNAME.github.io/lms-icm/` ke guru. Di HP, pengguna bisa memilih **Tambahkan ke Layar Utama** agar terbuka seperti aplikasi.
+
+### E1. Menghapus contoh kerja guru
+
+Lakukan di editor Apps Script (bukan di spreadsheet). Menghapus baris langsung di Sheets bisa membuat cache server menunjuk ke baris yang salah.
+
+1. Pastikan `Kode.gs` versi terbaru sudah ditempel (fungsi di bawah ada di dalamnya) → **Ctrl+S**.
+2. **Lihat dulu:** pilih fungsi **`cekDataKerjaGuru`** → ▶ **Jalankan**. Log menampilkan jumlah chapter & lesson plan per guru. Belum ada yang dihapus.
+3. **Hapus**, pilih salah satu:
+
+| Fungsi | Yang dihapus |
+|---|---|
+| **`hapusSemuaDataKerjaGuru`** | Semua chapter, sub-bab, TP, lesson plan, skenario, lampiran, riwayat persetujuan & antrean email yang belum terkirim — **dari semua guru** |
+| **`hapusDataKerjaGuruTertentu`** | Hanya milik guru yang emailnya Anda tulis di daftar `EMAIL_GURU` di dalam fungsi itu (ubah dulu daftarnya, **Ctrl+S**, baru jalankan) |
+
+4. Log menampilkan `🧹 Selesai` beserta jumlah baris yang dihapus dan jumlah berkas Drive yang dipindah ke **Sampah** (masih bisa dipulihkan dari Sampah Google Drive selama 30 hari).
+5. Minta pengguna yang sedang membuka aplikasi menekan **F5**.
+
+**Tidak ikut terhapus:** akun pengguna, master data (termasuk Period), term, pengaturan aplikasi, tanda tangan pimpinan, dan log audit. Akun demo dihapus/diganti terpisah lewat menu **Pengguna & Sistem** (nonaktifkan atau ubah email & nama).
+
+⚠️ Penghapusan tidak bisa dibatalkan untuk isi spreadsheet. Bila ragu, buat salinan dulu: buka spreadsheet database → **File → Buat salinan**.
 
 ---
 
@@ -400,42 +420,57 @@ git push
 
 Situs diperbarui otomatis dalam 1–2 menit. Jika masih tampil versi lama, tekan **Ctrl+Shift+R** (muat ulang paksa) atau buka di jendela Incognito.
 
-### F3. Alokasi sesi: 1 Period / 2 Period
+### F3. Period, minggu efektif, chapter, dan lesson plan (model terbaru)
 
-Setiap lesson plan punya pilihan **Alokasi waktu sesi ini** di langkah 4 (*Skenario & Waktu*). Bawaannya:
+Alur perhitungan mengikuti **term**:
 
-| Pilihan | Menit |
-|---|---|
-| 1 Period | 40 |
-| 2 Period | 80 |
+```
+Minggu efektif term  ×  period per minggu (mapel × kelas)  =  anggaran period term
+        9            ×            5                        =        45
+```
 
-- Saat guru memilih period, durasi Pendahuluan–Inti–Penutup otomatis disesuaikan (40 → 5+30+5, 80 → 10+60+10). Guru tetap bebas mengubah tiap durasi.
-- Bila total melebihi alokasi, muncul peringatan dan tombol **Sesuaikan ke … menit**. Lesson plan **tidak bisa dikirim** ke pimpinan sebelum totalnya ≤ alokasi.
-- Lesson plan baru di chapter yang sama otomatis memakai pilihan period terakhir guru.
-- PDF resmi mencantumkan alokasi, misalnya *80 menit (alokasi 2 Period · 80 menit)*.
+**1. Admin/QA mengatur dasar perhitungan** (menu **Master Data**):
 
-**Mengubah atau menambah pilihan** (QA / Super Admin): **Master Data → Alokasi Sesi (Period)** → *Tambah* atau ✏️.
-- **Menit per sesi**: panjang total sesi (mis. `40`, `80`, atau `120` untuk 3 Period).
-- **Berlaku untuk unit**: kosongkan agar berlaku di semua unit, atau isi kode unit bila panjang period berbeda, mis. `ECP,PS` untuk period 35 menit di KB-TK & SD dan `HS,MS` untuk period 40 menit di SMP & SMA.
-- Pilihan yang dinonaktifkan tidak tampil lagi bagi guru; lesson plan lama yang memakainya tetap tersimpan.
+| Yang diatur | Di mana | Keterangan |
+|---|---|---|
+| **Minggu efektif** | *Tahun & Term* → ✏️ pada term | Dikosongkan = **otomatis** dari tanggal mulai–selesai term (hari ÷ 7, dibulatkan). Isi angka (1–30) bila ada minggu libur/ujian yang harus dikurangi. |
+| **Period per minggu** | *Period per Mapel* | Tabel mapel × kelas per unit. Isi lalu **Simpan**. Nilai 0 = belum diatur (anggaran tidak dihitung). |
+| **Panjang 1P / 2P** | *Alokasi Sesi (Period)* | Bawaan 1 Period = 40 menit, 2 Period = 80 menit; bisa diubah per unit. |
+| **Aturan matriks diferensiasi** | *Pengguna & Sistem → Pengaturan* | **Bawaan: hanya satu dari 9 kotak** (3×3). Opsi lain: satu pilihan per baris Content/Process/Product. Instalasi lama yang sudah menyimpan pengaturan ini perlu mengubahnya sendiri. |
+
+**2. Guru mengisi Analisis Chapter** (per chapter/bab):
+- Isi **sub-bab/topik** (bisa ditambah kapan saja) dan **jumlah period** chapter.
+- Period tiap chapter **boleh berbeda-beda**. Panel anggaran menunjukkan anggaran term, period chapter lain, dan sisa.
+- **Total period semua chapter satu mapel di satu term harus tepat sama dengan anggaran term** (mis. 45). Chapter disimpan bertahap dan tidak boleh melewati anggaran; selama total belum pas, **lesson plan belum bisa dikirim ke pimpinan** (draft tetap bisa disimpan).
+- Tulis **semua TP** chapter, lalu pilih **sub-bab** untuk tiap TP. Satu sub-bab boleh punya beberapa TP; sub-bab tanpa TP diberi tanda peringatan.
+
+**3. Guru membuat Lesson Plan — satu LP per chapter** (4 chapter = 4 LP per term):
+- Langkah 1 memilih chapter (chapter yang sudah punya LP tidak bisa dipilih lagi).
+- Langkah 2 menampilkan TP chapter (hanya baca, dikelompokkan per sub-bab) + ICM Value + Sequence. Pemilihan TP dilakukan per pertemuan di langkah 4.
+- Langkah 3 Diferensiasi — dari 9 kotak matriks guru hanya bisa memilih **satu**; memilih kotak lain menggantikan pilihan sebelumnya.
+- Langkah 4 **Pertemuan**: tiap pertemuan berdurasi **1 Period (40 menit)** atau **2 Period (80 menit)**, dengan tanggal (opsional) dan skenario **Pendahuluan–Inti–Penutup**. Di tiap pertemuan guru **mencentang TP** yang diajarkan (daftar TP diambil dari Analisis Chapter, dikelompokkan per sub-bab); **sub-bab terisi otomatis** mengikuti TP yang dicentang. Satu TP boleh dicentang di lebih dari satu pertemuan. Tombol *Susun otomatis* membagi TP ke pertemuan sesuai period chapter.
+- **Setiap TP chapter harus masuk ke minimal satu pertemuan.** Bila masih ada TP yang belum terpetakan, ringkasan menampilkan daftarnya dan lesson plan **tidak bisa dikirim**.
+- **Total period semua pertemuan harus sama dengan period chapter** dan durasi skenario tiap pertemuan tidak boleh melebihi alokasinya, kalau tidak LP tidak bisa dikirim.
+- PDF resmi memuat bagian *Rencana Pertemuan* lengkap dengan alokasi, topik, dan daftar TP tiap pertemuan.
 
 ### F4. Memasang pembaruan ini di instalasi yang sudah berjalan
 
-Bila LMS ICM sudah terpasang sebelum fitur Period ada:
+Model ini mengubah struktur data (chapter berperiod, TP bersub-bab, satu LP berisi banyak pertemuan), sehingga **data kerja guru lama tidak kompatibel** dan harus dikosongkan.
 
-1. **Backend:** tempel `Kode.gs` versi baru → **Ctrl+S** → **Terapkan → Kelola deployment → ✏️ → Versi baru → Terapkan** (URL `/exec` tetap sama).
-2. **Tambahkan master Period:** pilih fungsi **`setupAppEnvironment`** → ▶ **Jalankan**. Karena database sudah berisi, fungsi ini **tidak** mengubah atau menggandakan data; ia hanya menambahkan *1 Period = 40* dan *2 Period = 80*. Log menampilkan `🆕 Master "Alokasi Sesi (Period)" ditambahkan`.
-3. **Frontend:** ekstrak ZIP baru → salin isi folder `lms-icm` (kecuali `js/config.js` — **pertahankan `config.js` lama Anda** yang sudah berisi URL `/exec`) ke `Documents\lms-icm`, menimpa berkas lama → lalu:
+1. **Cadangkan:** buka spreadsheet database → **File → Buat salinan**.
+2. **Backend:** tempel `Kode.gs` versi baru → **Ctrl+S** → **Terapkan → Kelola deployment → ✏️ → Versi baru → Terapkan** (URL `/exec` tetap sama).
+3. Jalankan **`setupAppEnvironment`** → ▶. Fungsi ini menambahkan kolom/master baru (`minggu_efektif`, `jumlah_period`, `sub_id`, `sesi_no`, Period per Mapel) tanpa menghapus data lain.
+4. Jalankan **`hapusSemuaDataKerjaGuru`** (lihat [E1](#e1-menghapus-contoh-kerja-guru)) agar chapter & lesson plan lama tidak bentrok. Akun, master data, dan term tidak ikut terhapus.
+5. Masuk sebagai **QA** → **Master Data → Period per Mapel**: isi period/minggu tiap mapel × kelas (instalasi lama tidak otomatis mendapat angka ini) → **Simpan**. Periksa juga **minggu efektif** term aktif.
+6. **Frontend:** ekstrak ZIP baru → salin isi folder `lms-icm` (kecuali `js/config.js` — **pertahankan `config.js` lama** yang berisi URL `/exec`) ke `Documents\lms-icm` → lalu:
 
 ```powershell
 git add .
-git commit -m "Fitur alokasi 1 Period / 2 Period"
+git commit -m "Period per term, chapter berperiod, LP per chapter"
 git push
 ```
 
-4. Tunggu 1–2 menit, buka situs, tekan **Ctrl+Shift+R**.
-
-Lesson plan lama (sebelum pembaruan) otomatis memakai period yang menitnya paling dekat dengan total skenarionya — misalnya draft 90 menit dianggap *2 Period*, lalu tampil peringatan "Lebih 10 menit" dengan tombol **Sesuaikan**.
+7. Tunggu 1–2 menit, buka situs, tekan **Ctrl+Shift+R**. Minta guru mengisi ulang Analisis Chapter dengan format baru.
 
 ### F5. Trigger otomatis
 

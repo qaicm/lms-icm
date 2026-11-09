@@ -701,3 +701,52 @@ textarea.form-control { min-height: 110px; resize: vertical; line-height: 1.55; 
 .period-pick button.on b { color: var(--primary-strong); }
 .period-pick button:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
 @media (max-width: 767px) { .period-pick { width: 100%; } .period-pick button { flex: 1 1 0; min-width: 0; } }
+
+/* ── Anggaran period term (Analisis Chapter) ── */
+.budget-card { padding: 18px 20px; }
+.budget-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 8px; }
+.budget-item { background: var(--surface-low); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+.budget-item .bar-mini { height: 7px; }
+.lo-sub { min-height: 34px; max-width: 320px; border-radius: 999px; background-color: var(--primary-tint); color: var(--primary-strong); border-color: transparent; }
+.lo-sub.is-invalid { background-color: var(--rose-tint); color: var(--rose-ink); border-color: var(--rose); }
+.tree-row.disabled { cursor: default; opacity: .72; }
+.tree-row.disabled:hover { background: transparent; }
+
+/* ── Daftar pertemuan di Lesson Plan Builder ── */
+.ses-card { background: var(--surface-pure); border: 1px solid var(--border); border-radius: var(--r-card); margin-bottom: 12px; box-shadow: var(--sh-1); overflow: hidden; scroll-margin-top: calc(var(--topbar-h) + 16px); }
+.ses-card.open { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); }
+.ses-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 6px; }
+.ses-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 10px; border: 0; background: transparent; border-radius: 12px; text-align: left; color: var(--text); min-height: 52px; }
+.ses-toggle:hover { background: var(--surface-low); }
+.ses-toggle:focus-visible { outline: 3px solid var(--primary); outline-offset: 1px; }
+.ses-no { flex: 0 0 34px; width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--primary-tint); color: var(--primary-strong); font-weight: 800; }
+.ses-no.ok { background: var(--green-tint); color: var(--green); }
+.ses-tools { display: flex; gap: 2px; flex: none; }
+.ses-body { padding: 4px 18px 18px; border-top: 1px solid var(--border); background: var(--surface); }
+.ses-body .scen { margin-top: 12px; }
+.ses-body .period-pick button { min-width: 120px; min-height: 48px; }
+@media (max-width: 767px) {
+  .ses-head { flex-wrap: wrap; padding: 6px; }
+  .ses-tools { width: 100%; justify-content: flex-end; border-top: 1px dashed var(--border); padding-top: 4px; }
+  .ses-body { padding: 4px 12px 14px; }
+  .budget-grid { grid-template-columns: 1fr; }
+}
+
+/* ── Master Data: period per mapel × kelas ── */
+.sp-grid th, .sp-grid td { vertical-align: middle; }
+.sp-grid td:first-child { min-width: 200px; }
+.sp-in { width: 72px; margin: 0 auto; text-align: center; min-height: 40px; padding: 4px 6px; font-weight: 700; }
+.sp-in.has { background: var(--primary-tint); border-color: transparent; color: var(--primary-strong); }
+.sp-in::-webkit-inner-spin-button { opacity: .5; }
+
+/* Pilihan TP per pertemuan */
+.tp-pick { display: grid; gap: 12px; }
+.tp-grp { border: 1px solid var(--border); border-radius: var(--r-ctl, 12px); background: var(--surface-pure); padding: 10px; display: grid; gap: 6px; }
+.tp-grp-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: .9rem; }
+.tp-grp-h .link-btn { margin-left: auto; font-size: .8rem; }
+.tp-opt { display: flex; align-items: flex-start; gap: 10px; text-align: left; width: 100%; min-height: 44px; padding: 8px 10px; border-radius: 10px; border: 1.5px solid transparent; background: transparent; color: var(--text); font-size: .86rem; line-height: 1.45; transition: all .15s var(--ease); }
+.tp-opt:hover { background: var(--surface-soft, rgba(107,95,214,.06)); }
+.tp-opt .ck { flex: 0 0 22px; width: 22px; height: 22px; margin-top: 1px; border-radius: 6px; border: 1.5px solid var(--border-strong, var(--border)); display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: .8rem; }
+.tp-opt.on { border-color: var(--primary); background: var(--primary-soft, rgba(107,95,214,.1)); }
+.tp-opt.on .ck { background: var(--primary); border-color: var(--primary); }
+.tp-opt b { color: var(--primary-strong); margin-right: 4px; }

@@ -120,12 +120,28 @@ function periodOpts(unit) {
   if (!opts.length) { const m = unitAlokasi(unit); if (m) opts.push({ kode: 'UNIT', label: 'Alokasi unit', menit: m }); }
   return opts;
 }
-/** Alokasi yang berlaku untuk sebuah LP: pilihan guru → yang menitnya sama dengan total → pilihan pertama. */
-function lpAlok(lp, ch) {
-  const opts = periodOpts((ch && ch.unit) || lp.unit), tot = (+((lp.scenarios || {}).beginning || {}).menit || 0) + (+((lp.scenarios || {}).middle || {}).menit || 0) + (+((lp.scenarios || {}).end || {}).menit || 0);
-  const hit = opts.find(o => o.kode === lp.alok_kode);
+/** Alokasi sebuah pertemuan: pilihan guru → menit terdekat dengan total skenario → pilihan pertama. */
+function sesAlok(se, unit) {
+  const opts = periodOpts(unit), sc = (se && se.scenarios) || {}, tot = (+(sc.beginning || {}).menit || 0) + (+(sc.middle || {}).menit || 0) + (+(sc.end || {}).menit || 0);
+  const hit = opts.find(o => o.kode === (se && se.alok_kode));
   if (hit || !opts.length) return hit || null;
   return tot > 0 ? opts.slice().sort((a, b) => Math.abs(a.menit - tot) - Math.abs(b.menit - tot) || b.menit - a.menit)[0] : opts[0];
+}
+/** Jumlah period sebuah pilihan alokasi ("2P"/"2 Period" → 2), sama dengan periodCount_ di server. */
+function periodCount(opt, unit) {
+  if (!opt) return 0;
+  const m = /(\d+)/.exec(String(opt.kode)) || /(\d+)/.exec(String(opt.label));
+  if (m && +m[1] > 0 && +m[1] <= 12) return +m[1];
+  const base = periodOpts(unit).map(o => o.menit).sort((a, b) => a - b)[0] || opt.menit;
+  return Math.max(1, Math.round(opt.menit / base));
+}
+/** Menit untuk 1 period di sebuah unit (untuk menaksir period dari total menit pada ringkasan). */
+const periodMinutes = unit => { const o = periodOpts(unit).find(x => periodCount(x, unit) === 1); return o ? o.menit : 40; };
+const sesMinutes = se => { const sc = (se && se.scenarios) || {}; return (+(sc.beginning || {}).menit || 0) + (+(sc.middle || {}).menit || 0) + (+(sc.end || {}).menit || 0); };
+/** Total period sebuah LP: dari daftar pertemuan bila ada, kalau tidak ditaksir dari total menit. */
+function lpPeriods(lp) {
+  if (lp.sessions && lp.sessions.length) return lp.sessions.reduce((a, se) => a + periodCount(sesAlok(se, lp.unit), lp.unit), 0);
+  return lp.durasi_total ? Math.round(lp.durasi_total / periodMinutes(lp.unit)) : 0;
 }
 const alokText = a => a ? a.label + ' · ' + a.menit + ' menit' : '';
 const round5 = x => Math.round(x / 5) * 5;
@@ -147,7 +163,15 @@ const termLabel = t => (t ? `Term ${t.term} · ${t.tahun_ajaran}` : '—');
 const person = id => S.people[id] || {};
 const myUnits = () => (S.me ? (S.me.unit === 'ALL' ? ['ECP', 'PS', 'MS', 'HS'] : String(S.me.unit).split(',').map(s => s.trim()).filter(Boolean)) : []);
 const cfg = (k, d) => (S.config && S.config[k] != null && S.config[k] !== '' ? S.config[k] : d);
-const targetSesi = ch => (ch.prediksi_minggu || 1) * cfg('sesi_per_minggu', 2);
+/** Period per minggu mapel di satu kelas (Master Data → Period per Mapel). */
+const subjPeriod = (unit, mapel, kelas) => { const r = S.refs.find(x => x.kategori === 'SUBJ_PERIOD' && x.aktif && x.kode === [unit, mapel, kelas].join('|')); return r && +r.nilai > 0 ? +r.nilai : 0; };
+/** Anggaran period term untuk mapel+kelas: minggu efektif × period/minggu. */
+function termBudget(t, unit, mapel, kelas) { const w = t ? +t.minggu_efektif || 0 : 0, ppm = subjPeriod(unit, mapel, kelas); return { weeks: w, ppm, total: w * ppm }; }
+/** Period yang dipakai chapter AKTIF guru ini (mapel+kelas+term), kecuali satu chapter. */
+const usedPeriods = (termId, mapel, kelas, exceptId) => sum(S.chapters.filter(c => c.term_id === termId && c.mata_pelajaran === mapel && String(c.kelas) === String(kelas) && c.status === 'AKTIF' && c.chapter_id !== exceptId).map(c => +c.jumlah_period || 0));
+/** Perkiraan minggu efektif dari rentang tanggal (sama dengan autoWeeks_ di server). */
+const autoWeeks = (a, b) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(a || '') || !/^\d{4}-\d{2}-\d{2}$/.test(b || '')) return 0; const d = Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 864e5) + 1; return Math.max(1, Math.round(d / 7)); };
+const diffMode = () => (String(cfg('diff_mode', 'SATU')).toUpperCase() === 'BARIS' ? 'BARIS' : 'SATU');
 
 /** Simpan snapshot data ke perangkat (debounce) agar pembukaan berikutnya instan. */
 const persist = debounce(() => {
@@ -874,7 +898,7 @@ function notifications() {
   if (isRole('TEACHER')) {
     S.lps.forEach(l => {
       if ((l.status === 'RETURNED' || l.status === 'APPROVED') && ts(l.decided_at) > horizon) {
-        out.push({ t: l.decided_at, icon: l.status === 'RETURNED' ? 'arrow-counterclockwise' : 'patch-check-fill', tone: l.status === 'RETURNED' ? 'amber' : 'green', title: l.status === 'RETURNED' ? 'Dikembalikan untuk revisi' : 'Lesson plan disetujui', text: `${l.chapter_label} · Sesi ${l.session_no} — ${l.reviewer_terakhir || 'Pimpinan'}`, go: l.status === 'RETURNED' ? ['builder', { id: l.lp_id }] : ['lp-view', { id: l.lp_id }] });
+        out.push({ t: l.decided_at, icon: l.status === 'RETURNED' ? 'arrow-counterclockwise' : 'patch-check-fill', tone: l.status === 'RETURNED' ? 'amber' : 'green', title: l.status === 'RETURNED' ? 'Dikembalikan untuk revisi' : 'Lesson plan disetujui', text: `${l.chapter_label} — ${l.reviewer_terakhir || 'Pimpinan'}`, go: l.status === 'RETURNED' ? ['builder', { id: l.lp_id }] : ['lp-view', { id: l.lp_id }] });
       }
     });
   } else {
@@ -882,7 +906,7 @@ function notifications() {
     leaderLps().forEach(l => {
       if (l.status === 'PENDING' && ts(l.submitted_at) > Date.now() - 14 * 864e5) {
         const late = waitDays(l.submitted_at) > sla;
-        out.push({ t: l.submitted_at, icon: late ? 'alarm' : 'inbox', tone: late ? 'rose' : 'sky', title: late ? `Menunggu > ${sla} hari` : 'Pengajuan baru', text: `${person(l.user_id).n || 'Guru'} · ${l.chapter_label} Sesi ${l.session_no}`, go: isRole('LEADER', 'SUPERADMIN') ? ['review', { id: l.lp_id }] : ['lp-view', { id: l.lp_id }] });
+        out.push({ t: l.submitted_at, icon: late ? 'alarm' : 'inbox', tone: late ? 'rose' : 'sky', title: late ? `Menunggu > ${sla} hari` : 'Pengajuan baru', text: `${person(l.user_id).n || 'Guru'} · ${l.chapter_label} · ${l.jumlah_sesi || 0} pertemuan`, go: isRole('LEADER', 'SUPERADMIN') ? ['review', { id: l.lp_id }] : ['lp-view', { id: l.lp_id }] });
       }
     });
   }
@@ -988,21 +1012,37 @@ const lpsOfChapter = id => liveLps().filter(l => l.chapter_id === id);
 const activeSubs = ch => (ch.subs || []).filter(s => s.aktif !== false);
 const activeLos = ch => (ch.los || []).filter(l => l.aktif !== false);
 const isEditable = l => l && (l.status === 'DRAFT' || l.status === 'RETURNED');
-const lpTitle = l => `${l.chapter_label || 'Tanpa chapter'} · Sesi ${l.session_no || '–'}`;
+const lpTitle = l => l.chapter_label || 'Tanpa chapter';
+const lpMeta = l => `${+l.jumlah_sesi || (l.sessions || []).length || 0} pertemuan · ${lpPeriods(l)} period`;
+const lpOfChapter = id => lpsOfChapter(id)[0] || null;
 const unsyncedBadge = key => (Outbox.has(key) ? `<span class="chip amber ms-1" title="Menunggu sinkron ke server">${ic('cloud-arrow-up')} sinkron</span>` : '');
 
+/** Progres chapter: 1 lesson plan per chapter; ukurannya period yang sudah direncanakan di LP vs period chapter. */
 function chapterProgress(ch) {
-  const target = targetSesi(ch), made = lpsOfChapter(ch.chapter_id).length;
-  const p = Math.min(100, Math.round((made / Math.max(1, target)) * 100));
-  return { target, made, p, tone: p >= 100 ? 'done' : p >= 50 ? 'amber' : 'rose', label: p >= 100 ? '100% Selesai' : p >= 50 ? p + '% Berjalan' : p + '% Tertunda' };
+  const lp = lpOfChapter(ch.chapter_id), target = +ch.jumlah_period || 0, planned = lp ? lpPeriods(lp) : 0;
+  const p = lp ? (lp.status === 'APPROVED' ? 100 : Math.min(99, Math.round(pct(Math.min(planned, target), Math.max(1, target))))) : 0;
+  const tone = !lp ? 'rose' : lp.status === 'APPROVED' ? 'done' : lp.status === 'RETURNED' ? 'rose' : 'amber';
+  const label = !lp ? 'Belum ada LP' : STATUS_LABEL[lp.status];
+  return { lp, target, planned, p, tone, label };
 }
-function missingSessions(termId, limit) {
-  const out = [];
-  chaptersInTerm(termId).filter(c => c.status === 'AKTIF').forEach(ch => {
-    const used = {}; lpsOfChapter(ch.chapter_id).forEach(l => { used[l.session_no] = 1; });
-    for (let s = 1; s <= targetSesi(ch); s++) if (!used[s]) out.push({ ch, s });
-  });
-  return limit ? out.slice(0, limit) : out;
+const chaptersWithoutLp = termId => chaptersInTerm(termId).filter(c => c.status === 'AKTIF' && !lpOfChapter(c.chapter_id));
+/** Ringkasan anggaran period per mapel+kelas guru pada term (untuk panel di daftar chapter & dashboard). */
+function budgetGroups(t) {
+  const g = {};
+  const add = (unit, mapel, kelas) => { if (!mapel || !kelas) return; const k = [unit, mapel, kelas].join('|'); if (!g[k]) g[k] = { unit, mapel, kelas, used: 0, chapters: 0 }; return g[k]; };
+  const mine = String(S.me.mata_pelajaran || '').split(',').map(x => x.trim()).filter(Boolean), kel = String(S.me.kelas || '').split(',').map(x => x.trim()).filter(Boolean);
+  mine.forEach(m => kel.forEach(k => myUnits().forEach(u => { if (S.refs.some(r => r.kategori === 'GRADE' && r.kode === k && (!r.deskripsi || r.deskripsi === u))) add(u, m, k); })));
+  chaptersInTerm(t.term_id).forEach(c => { const x = add(c.unit, c.mata_pelajaran, c.kelas); if (c.status === 'AKTIF') { x.used += +c.jumlah_period || 0; x.chapters++; } });
+  return Object.keys(g).map(k => Object.assign(g[k], termBudget(t, g[k].unit, g[k].mapel, g[k].kelas)));
+}
+function budgetPanelHtml(t, compact) {
+  const groups = budgetGroups(t);
+  if (!groups.length) return '';
+  return `<section class="card-x pure mb-4 budget-card"><div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-2"><div><b>${ic('hourglass-split')} Anggaran Period ${E(termLabel(t))}</b><div class="fs-xs text-2">${t.minggu_efektif || 0} minggu efektif × period per minggu tiap mapel. Total period semua chapter tidak boleh melebihi anggaran.</div></div></div>
+    <div class="budget-grid">${groups.map(x => { const left = x.total - x.used, pp = x.total ? Math.min(100, Math.round(pct(x.used, x.total))) : 0, tone = !x.total ? 'gray' : left < 0 ? 'rose' : left === 0 ? 'green' : 'amber';
+      return `<div class="budget-item"><div class="d-flex justify-content-between gap-2 align-items-baseline"><b class="clamp-1">${E(refLabel('SUBJECT', x.mapel))} · ${E(gradeLabel(x.kelas))}</b><span class="fs-sm fw-7" style="color:var(--${tone === 'green' ? 'green' : tone === 'rose' ? 'rose' : 'primary-strong'})">${x.used}${x.total ? ' / ' + x.total : ''} period</span></div>
+        ${x.total ? `<div class="bar-mini ${tone === 'green' ? 'green' : tone === 'rose' ? 'rose' : ''} mt-1"><span style="width:${pp}%"></span></div><div class="fs-xs text-2 mt-1">${x.weeks} minggu × ${x.ppm} period/minggu · ${left > 0 ? 'sisa <b>' + left + '</b> period belum dipetakan ke chapter' : left === 0 ? '<b>pas</b> — seluruh period sudah dipetakan' : '<b style="color:var(--rose)">lebih ' + (-left) + ' period</b>'}</div>`
+          : `<div class="fs-xs mt-1" style="color:var(--amber-ink)">${ic('info-circle')} Period per minggu untuk mapel & kelas ini belum diatur QA (Master Data → Period per Mapel).</div>`}${compact ? '' : ''}</div>`; }).join('')}</div></section>`;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1017,14 +1057,16 @@ PAGES.dashboard = {
     const approved = by('APPROVED'), pending = by('PENDING'), returned = by('RETURNED'), drafts = by('DRAFT');
     const withTp = chs.filter(c => activeLos(c).length > 0).length;
     const weekAgo = Date.now() - 7 * 864e5, apWeek = approved.filter(l => ts(l.decided_at) > weekAgo).length;
-    const totalTarget = sum(chs.map(targetSesi)), made = lps.length, coverage = Math.round(pct(Math.min(made, totalTarget), totalTarget));
-    const miss = missingSessions(tid, 5);
+    const actChs = chs.filter(c => c.status === 'AKTIF'), totalTarget = actChs.length, made = actChs.filter(c => lpOfChapter(c.chapter_id)).length, coverage = Math.round(pct(made, totalTarget));
+    const missAll = chaptersWithoutLp(tid), miss = missAll.slice(0, 5);
+    const bud = t ? budgetGroups(t).filter(x => x.total) : [], budLeft = sum(bud.map(x => Math.max(0, x.total - x.used)));
     const insights = [];
     if (returned.length) insights.push(`${returned.length} dokumen menunggu revisi Anda — mulai dari yang tanggal mengajarnya paling dekat.`);
     if (pending.length) insights.push(`${pending.length} lesson plan sedang ditinjau pimpinan; status akan diperbarui otomatis.`);
     const decided = lps.filter(l => l.decided_at && l.submitted_at && l.status !== 'PENDING');
     if (decided.length) { const avg = sum(decided.map(l => Math.max(0, ts(l.decided_at) - ts(l.submitted_at)))) / decided.length / 864e5; insights.push(`Rata-rata waktu keputusan pimpinan untuk dokumen Anda: ${avg.toLocaleString('id-ID', { maximumFractionDigits: 1 })} hari.`); }
-    if (totalTarget) insights.push(`Cakupan term: ${made} dari ${totalTarget} sesi sudah memiliki lesson plan (${coverage}%).`);
+    if (totalTarget) insights.push(`Cakupan term: ${made} dari ${totalTarget} chapter sudah memiliki lesson plan (${coverage}%).`);
+    if (budLeft) insights.push(`Masih ada ${budLeft} period dalam anggaran term yang belum dipetakan ke chapter.`);
     if (!insights.length) insights.push('Mulai dengan menyusun Analisis Chapter untuk term ini — TP/LO akan otomatis tersedia di Lesson Plan Builder.');
     const actionList = returned.slice().sort((a, b) => (a.tanggal_ajar || '9') < (b.tanggal_ajar || '9') ? -1 : 1);
     return `
@@ -1043,7 +1085,7 @@ PAGES.dashboard = {
     ${actionList.length ? `<section class="card-x action-panel mb-4">
       <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="icon-tile sm amber">${ic('bell')}</span><div><h3>Perlu Tindakan Anda (${actionList.length} Dokumen Dikembalikan)</h3><div class="sub">Catatan pimpinan untuk perbaikan sebelum jadwal mengajar dimulai.</div></div></div><span class="chip amber">${ic('circle-fill', 'fs-xs')} Prioritas Tinggi</span></div>
       ${actionList.map(l => `<div class="action-item"><span class="pill pill-RETURNED">Returned</span>
-        <div class="min-w-0"><div class="fw-7">${E(lpTitle(l))} <span class="text-2 fw-6 fs-sm">(${E((l.sub_label || '').split(';')[0])})</span></div>
+        <div class="min-w-0"><div class="fw-7">${E(lpTitle(l))} <span class="text-2 fw-6 fs-sm">(${E(lpMeta(l))})</span></div>
           <div class="note">${ic('chat-square-quote', 'me-1')} ${E(l.reviewer_terakhir || 'Pimpinan')}: “${E(l.catatan_terakhir || 'Lihat anotasi pada dokumen.')}”</div></div>
         <div class="d-flex align-items-center gap-3 flex-wrap justify-content-end"><span class="meta">${l.tanggal_ajar ? 'Batas: ' + E(relDay(l.tanggal_ajar)) : 'Rev. ' + E(l.revisi_ke)}</span><button class="btn btn-primary btn-sm" data-go="builder" data-p-id="${E(l.lp_id)}">Buka & Revisi ${ic('arrow-right')}</button></div></div>`).join('')}
     </section>` : (drafts.length ? `<section class="card-x mb-4"><div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="icon-tile sm">${ic('pencil-square')}</span><div><h3>Lanjutkan draft Anda</h3><div class="sub">${drafts.length} lesson plan belum diajukan ke pimpinan.</div></div></div></div>
@@ -1051,15 +1093,15 @@ PAGES.dashboard = {
 
     <div class="row g-4 mb-4">
       <div class="col-lg-7"><section class="card-x h-100">
-        <div class="card-head"><div><h3>Sesi Terencana per Chapter</h3><div class="sub">Realisasi perencanaan ${E(myUnits().map(unitShort).join(', '))} · ${E(termLabel(t))}</div></div><span class="chip">Term Coverage: ${coverage}%</span></div>
-        ${chs.length ? chs.map(ch => { const p = chapterProgress(ch); return `<div class="prog-item"><div class="prog-head"><div class="t clamp-1">${E(ch.nama_chapter)}<small>(${p.made} / ${p.target} Sesi)</small></div><span class="chip ${p.tone === 'done' ? 'green' : p.tone}">${E(p.label)}</span></div><div class="prog-track ${p.tone === 'done' ? '' : p.tone}"><span style="width:${p.p}%"></span></div></div>`; }).join('')
+        <div class="card-head"><div><h3>Lesson Plan per Chapter</h3><div class="sub">Period terencana di lesson plan dibanding period chapter · ${E(termLabel(t))}</div></div><span class="chip">Term Coverage: ${coverage}%</span></div>
+        ${actChs.length ? actChs.map(ch => { const p = chapterProgress(ch); return `<div class="prog-item"><div class="prog-head"><div class="t clamp-1">${E(ch.kode)} · ${E(ch.nama_chapter)}<small>(${p.planned} / ${p.target} period)</small></div><span class="chip ${p.tone === 'done' ? 'green' : p.tone}">${E(p.label)}</span></div><div class="prog-track ${p.tone === 'done' ? '' : p.tone}"><span style="width:${p.p}%"></span></div></div>`; }).join('')
           : emptyState('journal-plus', 'Belum ada chapter', 'Susun Analisis Chapter agar TP/LO dapat dipanggil di Lesson Plan.', `<button class="btn btn-primary" data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button>`)}
-        ${chs.length ? `<div class="inset d-flex flex-wrap gap-3 justify-content-between align-items-center mt-4 fs-sm"><span><span class="dot"></span> Lengkap / sesuai target &nbsp; <span class="dot amber"></span> Sedang dikerjakan</span><button class="link-btn" data-go="chapters">Rincian Kurikulum ${ic('arrow-right')}</button></div>` : ''}
+        ${actChs.length ? `<div class="inset d-flex flex-wrap gap-3 justify-content-between align-items-center mt-4 fs-sm"><span><span class="dot"></span> Disetujui &nbsp; <span class="dot amber"></span> Draft / ditinjau &nbsp; <span class="dot rose"></span> Belum ada / revisi</span><button class="link-btn" data-go="chapters">Rincian Kurikulum ${ic('arrow-right')}</button></div>` : ''}
       </section></div>
       <div class="col-lg-5"><section class="card-x h-100">
-        <div class="card-head"><div><h3>Sesi Tanpa Lesson Plan</h3><div class="sub">Sesi target yang belum memiliki rencana</div></div><span class="chip rose">${missingSessions(tid).length}</span></div>
-        ${miss.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Sesi</th><th>Materi</th><th class="text-end">Aksi</th></tr></thead><tbody>${miss.map(m => `<tr><td class="fw-7 text-nowrap">Sesi ${m.s}<div class="t-sub">${E(m.ch.kode)}</div></td><td><div class="t-title clamp-1">${E(m.ch.nama_chapter)}</div><div class="t-sub">${E(gradeLabel(m.ch.kelas))} · ${E(refLabel('SUBJECT', m.ch.mata_pelajaran))}</div></td><td class="text-end"><button class="btn btn-soft btn-sm" data-go="builder" data-p-chapter="${E(m.ch.chapter_id)}" data-p-session="${m.s}">Buat</button></td></tr>`).join('')}</tbody></table></div>`
-          : `<div class="empty py-4"><div class="ill">${ic('check2-all')}</div><h4>Semua sesi sudah direncanakan</h4><p>Tambahkan chapter baru bila materi berikutnya siap.</p></div>`}
+        <div class="card-head"><div><h3>Chapter Tanpa Lesson Plan</h3><div class="sub">Setiap chapter memerlukan satu lesson plan</div></div><span class="chip rose">${missAll.length}</span></div>
+        ${miss.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Chapter</th><th>Period</th><th class="text-end">Aksi</th></tr></thead><tbody>${miss.map(c => `<tr><td><div class="t-title clamp-1">${E(c.kode)} · ${E(c.nama_chapter)}</div><div class="t-sub">${E(gradeLabel(c.kelas))} · ${E(refLabel('SUBJECT', c.mata_pelajaran))}</div></td><td class="fw-7 text-nowrap">${+c.jumlah_period || 0} period</td><td class="text-end"><button class="btn btn-soft btn-sm" data-go="builder" data-p-chapter="${E(c.chapter_id)}">Buat</button></td></tr>`).join('')}</tbody></table></div>`
+          : `<div class="empty py-4"><div class="ill">${ic('check2-all')}</div><h4>Semua chapter sudah punya lesson plan</h4><p>Tambahkan chapter baru bila materi berikutnya siap.</p></div>`}
         <div class="inset d-flex justify-content-between align-items-center mt-3 fs-sm"><span class="text-2">${ic('calendar-week')} ${E(termLabel(t))}</span><button class="link-btn" data-go="lps">Lihat semua lesson plan ${ic('arrow-right')}</button></div>
       </section></div>
     </div>
@@ -1070,8 +1112,8 @@ PAGES.dashboard = {
 ACT['t.export'] = () => {
   const t = viewTerm();
   downloadCsv(`Rekap_LessonPlan_${(S.me.nama || '').split(',')[0].replace(/\W+/g, '_')}_${t ? t.kode.replace(/\W+/g, '_') : ''}.csv`,
-    ['Kode Dokumen', 'Chapter', 'Sub-chapter', 'Sesi', 'Tanggal Ajar', 'Durasi (menit)', 'Status', 'Revisi', 'Catatan Terakhir', 'Diajukan', 'Diputuskan'],
-    lpsInTerm(t.term_id).map(l => [l.kode_dok, l.chapter_label, l.sub_label, l.session_no, l.tanggal_ajar, l.durasi_total, STATUS_LABEL[l.status], l.revisi_ke, l.catatan_terakhir, l.submitted_at, l.decided_at]));
+    ['Kode Dokumen', 'Chapter', 'Sub-bab / Topik', 'Jumlah Pertemuan', 'Total Period', 'Total Menit', 'Mulai', 'Status', 'Revisi', 'Catatan Terakhir', 'Diajukan', 'Diputuskan'],
+    lpsInTerm(t.term_id).map(l => [l.kode_dok, l.chapter_label, l.sub_label, l.jumlah_sesi, lpPeriods(l), l.durasi_total, l.tanggal_ajar, STATUS_LABEL[l.status], l.revisi_ke, l.catatan_terakhir, l.submitted_at, l.decided_at]));
 };
 
 // ════════════════════════════════════════════════════════════
@@ -1096,6 +1138,7 @@ PAGES.chapters = {
       <div class="actions"><span class="tb-pill">${ic('circle-fill', 'fs-xs')} ${all.length} Bab Total</span><span class="tb-pill">${ic('patch-check')} ${withLp} Dipakai LP</span>
         ${t.status === 'ACTIVE' ? `<button class="btn btn-primary" data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button>` : `<span class="chip gray">${ic('lock')} Term ${t.status === 'CLOSED' ? 'ditutup' : 'belum aktif'}</span>`}</div>
     </div>
+    ${budgetPanelHtml(t)}
     <section class="card-x flush pure mb-4">
       <div class="filter-bar">
         <div class="input-icon search">${ic('search')}<input class="form-control" data-f="ch.q" value="${E(u.q)}" placeholder="Cari bab, sub-bab, atau kata kunci TP…" aria-label="Cari chapter"></div>
@@ -1104,26 +1147,26 @@ PAGES.chapters = {
         <button class="btn btn-soft btn-sm" data-act="ch.export">${ic('download')} Ekspor Matrix</button>
       </div>
       ${(u.q || u.mapel || u.status) ? `<div class="filter-chips">${u.q ? `<span class="chip">Cari: ${E(u.q)} <button class="x" data-act="ch.clear" data-k="q" aria-label="Hapus filter">×</button></span>` : ''}${u.mapel ? `<span class="chip">Mapel: ${E(refLabel('SUBJECT', u.mapel))} <button class="x" data-act="ch.clear" data-k="mapel">×</button></span>` : ''}${u.status ? `<span class="chip">Status: ${E(u.status)} <button class="x" data-act="ch.clear" data-k="status">×</button></span>` : ''}<button class="link-btn fs-sm" data-act="ch.clear" data-k="all">${ic('arrow-counterclockwise')} Reset Filter</button></div>` : ''}
-      ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Kode & Judul Chapter</th><th>Mapel & Kelas</th><th>Sub-bab</th><th>TP / LO</th><th>Estimasi</th><th>Lesson Plan</th><th class="text-end">Aksi</th></tr></thead><tbody>
+      ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Kode & Judul Chapter</th><th>Mapel & Kelas</th><th>Sub-bab</th><th>TP / LO</th><th>Period</th><th>Lesson Plan</th><th class="text-end">Aksi</th></tr></thead><tbody>
         ${slice.map(c => { const p = chapterProgress(c), used = lpsOfChapter(c.chapter_id).length, no = String(c.kode || '').replace(/\D/g, '') || '–'; const noTp = !activeLos(c).length; return `<tr class="clickable ${noTp ? 'row-warn' : ''}" data-act="ch.open" data-id="${E(c.chapter_id)}">
           <td data-label="Chapter" class="col-main"><div class="d-flex gap-3 align-items-center"><span class="code-chip ${noTp ? 'amber' : ''}">${E(no.padStart(2, '0'))}</span><div class="min-w-0"><div class="t-title">${E(c.kode)}: ${E(c.nama_chapter)} ${unsyncedBadge('ch:' + c.chapter_id)}</div><div class="t-sub clamp-1">${c.status === 'NONAKTIF' ? '<span class="pill pill-NONAKTIF plain me-1">Nonaktif</span>' : ''}${E(activeSubs(c).slice(0, 2).map(s => s.nama_sub).join(' · '))}${activeSubs(c).length > 2 ? ' …' : ''}</div></div></div></td>
           <td data-label="Mapel & Kelas"><div class="fw-6">${E(refLabel('SUBJECT', c.mata_pelajaran))}</div><div class="t-sub">${E(gradeLabel(c.kelas))} · ${E(unitShort(c.unit))}</div></td>
           <td data-label="Sub-chapter"><span class="chip">${activeSubs(c).length} Sub-bab</span></td>
           <td data-label="TP / LO"><span class="chip ${noTp ? 'amber' : ''}">${activeLos(c).length} TP</span></td>
-          <td data-label="Estimasi" class="text-nowrap">${ic('clock', 'text-3 me-1')} ${c.prediksi_minggu} Minggu</td>
-          <td data-label="Lesson Plan"><div class="fs-sm fw-6">${p.made}/${p.target} sesi</div><div class="bar-mini ${p.tone === 'done' ? 'green' : p.tone}"><span style="width:${p.p}%"></span></div></td>
+          <td data-label="Period" class="text-nowrap fw-6">${ic('hourglass-split', 'text-3 me-1')} ${+c.jumlah_period || 0} period</td>
+          <td data-label="Lesson Plan">${p.lp ? `<div class="fs-sm fw-6">${pill(p.lp.status)}</div><div class="t-sub">${p.planned}/${p.target} period</div>` : `<span class="chip rose">Belum ada</span>`}</td>
           <td class="text-end cell-actions"><div class="row-actions">
             <button class="btn-icon" data-act="ch.open" data-id="${E(c.chapter_id)}" aria-label="Edit">${ic('pencil')}</button>
             <button class="btn-icon" data-act="ch.dup" data-id="${E(c.chapter_id)}" aria-label="Duplikat ke term lain" title="Duplikat ke term lain">${ic('copy')}</button>
-            <button class="btn-icon" data-act="ch.lp" data-id="${E(c.chapter_id)}" aria-label="Buat lesson plan" title="Buat lesson plan dari chapter ini">${ic('file-earmark-plus')}</button>
+            <button class="btn-icon" data-act="ch.lp" data-id="${E(c.chapter_id)}" aria-label="${p.lp ? 'Buka lesson plan' : 'Buat lesson plan'}" title="${p.lp ? 'Buka lesson plan chapter ini' : 'Buat lesson plan dari chapter ini'}">${ic(p.lp ? 'file-earmark-text' : 'file-earmark-plus')}</button>
             <button class="btn-icon danger" data-act="ch.del" data-id="${E(c.chapter_id)}" ${used ? 'disabled title="Terkait lesson plan yang sudah dibuat"' : 'title="Hapus"'} aria-label="Hapus">${ic('trash3')}</button></div></td></tr>`; }).join('')}
         </tbody></table></div>
         <div class="tbl-foot"><span>Menampilkan ${slice.length} dari ${rows.length} chapter · Tampilkan <select class="form-select d-inline-block w-auto" style="min-height:32px;padding:.15rem 2rem .15rem .6rem" data-f="ch.per">${[10, 25, 50].map(n => `<option ${u.per === n ? 'selected' : ''}>${n}</option>`).join('')}</select></span>${pager(rows.length, page, u.per, 'ch.page')}</div>`
-        : emptyState('journal-plus', all.length ? 'Tidak ada chapter yang cocok' : 'Belum ada Analisis Chapter untuk term ini', all.length ? 'Ubah kata kunci atau reset filter.' : 'Susun chapter, sub-chapter, prediksi waktu, dan TP/LO sekali di awal term.', all.length ? '' : `<button class="btn btn-primary" data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button>`)}
+        : emptyState('journal-plus', all.length ? 'Tidak ada chapter yang cocok' : 'Belum ada Analisis Chapter untuk term ini', all.length ? 'Ubah kata kunci atau reset filter.' : 'Susun chapter, sub-bab/topik, jumlah period, dan TP/LO sekali di awal term.', all.length ? '' : `<button class="btn btn-primary" data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button>`)}
     </section>
     <div class="row g-3">
       <div class="col-md-4"><div class="card-x pure d-flex gap-3"><span class="icon-tile">${ic('diagram-3')}</span><div><b>Alur Tujuan Pembelajaran</b><div class="text-2 fs-sm">${totalTp} TP terdefinisi di ${all.length} chapter dan otomatis muncul di Lesson Plan Builder.</div></div></div></div>
-      <div class="col-md-4"><div class="card-x pure d-flex gap-3"><span class="icon-tile sky">${ic('clipboard2-check')}</span><div><b>Kesiapan Kurikulum</b><div class="text-2 fs-sm">${all.length ? Math.round(pct(all.filter(c => activeLos(c).length && activeSubs(c).length).length, all.length)) : 0}% chapter siap diturunkan menjadi lesson plan mingguan.</div></div></div></div>
+      <div class="col-md-4"><div class="card-x pure d-flex gap-3"><span class="icon-tile sky">${ic('clipboard2-check')}</span><div><b>Kesiapan Kurikulum</b><div class="text-2 fs-sm">${all.length ? Math.round(pct(all.filter(c => activeLos(c).length && activeSubs(c).length).length, all.length)) : 0}% chapter siap diturunkan menjadi lesson plan.</div></div></div></div>
       <div class="col-md-4"><div class="card-x pure d-flex gap-3"><span class="icon-tile amber">${ic('calendar-check')}</span><div><b>Batas Analisis Chapter</b><div class="text-2 fs-sm">${term && term.batas_rpp ? 'Disarankan selesai ' + E(fmtTanggal(term.batas_rpp)) + ' (' + E(relDay(term.batas_rpp)) + ').' : 'Belum ditetapkan oleh QA.'}</div></div></div></div>
     </div>`;
   }
@@ -1146,7 +1189,7 @@ Object.assign(ACT, {
   'ch.open': el => go('chapter-form', { id: el.dataset.id }),
   'ch.page': el => { S.ui.ch.page = +el.dataset.page; renderRoute(false); },
   'ch.clear': el => { const k = el.dataset.k; if (k === 'all') S.ui.ch = { q: '', mapel: '', status: '', page: 1, per: S.ui.ch.per }; else S.ui.ch[k] = ''; renderRoute(false); },
-  'ch.lp': el => go('builder', { chapter: el.dataset.id }),
+  'ch.lp': el => { const lp = lpOfChapter(el.dataset.id); if (lp) go(isEditable(lp) ? 'builder' : 'lp-view', { id: lp.lp_id }); else go('builder', { chapter: el.dataset.id }); },
   'ch.dup': el => {
     const src = chapterById(el.dataset.id); if (!src) return;
     const terms = S.terms.filter(t => t.status === 'ACTIVE');
@@ -1167,8 +1210,8 @@ Object.assign(ACT, {
   },
   'ch.export': () => {
     const t = viewTerm(), rows = [];
-    chaptersInTerm(t.term_id).forEach(c => activeLos(c).forEach(l => rows.push([c.kode, c.nama_chapter, refLabel('SUBJECT', c.mata_pelajaran), gradeLabel(c.kelas), c.prediksi_minggu, activeSubs(c).map(s => s.kode + ' ' + s.nama_sub).join(' | '), l.kode, stripTags(l.teks_tp), l.ranah, l.taksonomi])));
-    downloadCsv('Matrix_Analisis_Chapter_' + t.kode.replace(/\W+/g, '_') + '.csv', ['Kode', 'Chapter', 'Mapel', 'Kelas', 'Prediksi Minggu', 'Sub-chapter', 'Kode TP', 'Tujuan Pembelajaran', 'Ranah', 'Taksonomi'], rows);
+    chaptersInTerm(t.term_id).forEach(c => { const sm = byKey(c.subs || [], 'sub_id'); activeLos(c).forEach(l => rows.push([c.kode, c.nama_chapter, refLabel('SUBJECT', c.mata_pelajaran), gradeLabel(c.kelas), c.jumlah_period, sm[l.sub_id] ? sm[l.sub_id].kode + ' ' + sm[l.sub_id].nama_sub : '', l.kode, stripTags(l.teks_tp), l.ranah, l.taksonomi])); });
+    downloadCsv('Matrix_Analisis_Chapter_' + t.kode.replace(/\W+/g, '_') + '.csv', ['Kode', 'Chapter', 'Mapel', 'Kelas', 'Jumlah Period', 'Sub-bab / Topik', 'Kode TP', 'Tujuan Pembelajaran', 'Ranah', 'Taksonomi'], rows);
   }
 });
 
@@ -1195,7 +1238,10 @@ const RANAH = ['Kognitif & Analisis', 'Psikomotorik & Kolaborasi', 'Afektif & Ka
 function newChapterForm(termId) {
   const units = myUnits(), unit = units[0] || 'HS', mapel = String(S.me.mata_pelajaran || '').split(',')[0].trim();
   const kelas = String(S.me.kelas || '').split(',')[0].trim();
-  return { chapter_id: uid(), term_id: termId, unit, mata_pelajaran: mapel || (refsOf('SUBJECT')[0] || {}).kode || '', kelas: kelas || '', nama_chapter: '', prediksi_minggu: 2, subs: [{ sub_id: uid(), nama_sub: '' }], los: [{ lo_id: uid(), teks_tp: '', ranah: RANAH[0], taksonomi: '' }], _new: true };
+  const m = mapel || (refsOf('SUBJECT')[0] || {}).kode || '', sub0 = uid();
+  const b = termBudget(termById(termId), unit, m, kelas), left = b.total ? b.total - usedPeriods(termId, m, kelas) : 0;
+  const jp = b.total ? Math.max(1, Math.min(left > 0 ? left : 1, b.ppm * 2)) : 4;
+  return { chapter_id: uid(), term_id: termId, unit, mata_pelajaran: m, kelas: kelas || '', nama_chapter: '', jumlah_period: jp, subs: [{ sub_id: sub0, nama_sub: '' }], los: [{ lo_id: uid(), teks_tp: '', ranah: RANAH[0], taksonomi: '', sub_id: sub0 }], _new: true };
 }
 
 PAGES['chapter-form'] = {
@@ -1205,10 +1251,11 @@ PAGES['chapter-form'] = {
     if (p.id && !exist) return emptyState('journal-x', 'Chapter tidak ditemukan', 'Mungkin sudah dihapus atau belum tersinkron.', `<button class="btn btn-primary" data-go="chapters">Kembali ke daftar</button>`);
     let f;
     const draft = LS.get('chform:' + (p.id || 'new'), null);
-    if (exist) { f = clone(exist); f.subs = activeSubs(f).map(s => ({ sub_id: s.sub_id, nama_sub: s.nama_sub, kode: s.kode })); f.los = activeLos(f).map(l => ({ lo_id: l.lo_id, teks_tp: l.teks_tp, ranah: l.ranah || RANAH[0], taksonomi: l.taksonomi || '', kode: l.kode })); }
-    else if (p.dup) { const src = chapterById(p.dup); f = newChapterForm(p.term || activeTerm().term_id); if (src) Object.assign(f, { unit: src.unit, mata_pelajaran: src.mata_pelajaran, kelas: src.kelas, nama_chapter: src.nama_chapter, prediksi_minggu: src.prediksi_minggu, subs: activeSubs(src).map(s => ({ sub_id: uid(), nama_sub: s.nama_sub })), los: activeLos(src).map(l => ({ lo_id: uid(), teks_tp: l.teks_tp, ranah: l.ranah, taksonomi: l.taksonomi })) }); }
+    if (exist) { f = clone(exist); f.subs = activeSubs(f).map(s => ({ sub_id: s.sub_id, nama_sub: s.nama_sub, kode: s.kode })); f.los = activeLos(f).map(l => ({ lo_id: l.lo_id, teks_tp: l.teks_tp, ranah: l.ranah || RANAH[0], taksonomi: l.taksonomi || '', kode: l.kode, sub_id: f.subs.some(s => s.sub_id === l.sub_id) ? l.sub_id : '' })); }
+    else if (p.dup) { const src = chapterById(p.dup); f = newChapterForm(p.term || activeTerm().term_id); if (src) { const idMap = {}; const subs = activeSubs(src).map(s => { const n = uid(); idMap[s.sub_id] = n; return { sub_id: n, nama_sub: s.nama_sub }; }); Object.assign(f, { unit: src.unit, mata_pelajaran: src.mata_pelajaran, kelas: src.kelas, nama_chapter: src.nama_chapter, jumlah_period: src.jumlah_period || f.jumlah_period, subs, los: activeLos(src).map(l => ({ lo_id: uid(), teks_tp: l.teks_tp, ranah: l.ranah, taksonomi: l.taksonomi, sub_id: idMap[l.sub_id] || '' })) }); } }
     else f = newChapterForm(activeTerm() ? activeTerm().term_id : '');
     if (draft && draft.f && (p.restore || (!exist && !p.dup && draft.f.nama_chapter))) { f = Object.assign(f, draft.f); S.ui.chDraftRestored = true; }
+    if (!(+f.jumlah_period > 0)) f.jumlah_period = 4;
     S.form = { f, exist: !!exist, errors: {}, savedAt: draft ? draft.at : 0, key: 'chform:' + (p.id || 'new') };
     return `<div id="chForm">${chapterFormHtml()}</div>`;
   },
@@ -1219,7 +1266,7 @@ PAGES['chapter-form'] = {
 function chapterFormHtml() {
   const { f, exist, errors } = S.form, units = myUnits().length ? myUnits() : ['HS'];
   const term = termById(f.term_id), no = exist ? (String(chapterById(f.chapter_id).kode || '').replace(/\D/g, '') || '1') : String(chaptersInTerm(f.term_id).length + 1);
-  const jp = f.prediksi_minggu * cfg('jp_per_minggu', 4), used = exist ? lpsOfChapter(f.chapter_id).length : 0;
+  const used = exist ? lpsOfChapter(f.chapter_id).length : 0;
   const grades = refsOf('GRADE').filter(g => !g.deskripsi || g.deskripsi === f.unit);
   const err = k => errors[k] ? `<div class="field-err" data-err="${k}">${ic('exclamation-circle')} ${E(errors[k])}</div>` : '';
   const subjects = refsOf('SUBJECT'), mine = String(S.me.mata_pelajaran || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -1245,38 +1292,40 @@ function chapterFormHtml() {
   </section>
 
   <section class="bld-card">
-    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">2</span><div><h3>Rincian Sub-Chapter & Alokasi Waktu</h3><div class="sub">Urutan materi dan estimasi jam pertemuan</div></div></div><span class="chip">${ic('clock')} ${jp} JP Total</span></div>
+    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">2</span><div><h3>Sub-bab / Topik & Jumlah Period</h3><div class="sub">Urutan topik materi dan period yang dialokasikan untuk chapter ini</div></div></div><span class="chip">${ic('hourglass-split')} <span id="cfJpChip">${+f.jumlah_period || 0}</span> period</span></div>
     <div class="inset">
-      <div class="d-flex justify-content-between mb-2 px-1"><span class="fs-xs fw-7 text-3" style="letter-spacing:.08em">DAFTAR SUB-POKOK BAHASAN</span><span class="fs-xs text-3">Gunakan panah untuk mengubah urutan</span></div>
+      <div class="d-flex justify-content-between mb-2 px-1"><span class="fs-xs fw-7 text-3" style="letter-spacing:.08em">DAFTAR SUB-BAB / TOPIK</span><span class="fs-xs text-3">Gunakan panah untuk mengubah urutan</span></div>
       <div id="cfSubs">${f.subs.map((s, i) => `<div class="file-row mb-2" style="padding:8px 10px">
         <span class="d-flex flex-column"><button class="btn-icon" style="height:18px" data-act="chf.subMove" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Naikkan">${ic('chevron-up')}</button><button class="btn-icon" style="height:18px" data-act="chf.subMove" data-i="${i}" data-d="1" ${i === f.subs.length - 1 ? 'disabled' : ''} aria-label="Turunkan">${ic('chevron-down')}</button></span>
         <span class="chip">${E(no)}.${i + 1}</span>
-        <input class="form-control border-0 bg-transparent px-1" style="min-height:36px" data-cfsub="${i}" value="${E(s.nama_sub)}" placeholder="Nama sub-chapter ${i + 1}…" aria-label="Sub-chapter ${i + 1}">
+        <input class="form-control border-0 bg-transparent px-1" style="min-height:36px" data-cfsub="${i}" value="${E(s.nama_sub)}" placeholder="Nama sub-bab / topik ${i + 1}…" aria-label="Sub-bab ${i + 1}">
         <button class="btn-icon danger" data-act="chf.subDel" data-i="${i}" aria-label="Hapus sub-chapter" ${f.subs.length === 1 ? 'disabled' : ''}>${ic('trash3')}</button></div>`).join('')}</div>
-      <button class="btn btn-outline w-100" data-act="chf.subAdd" style="border-style:dashed;color:var(--primary-strong)">${ic('plus-circle')} Tambah Sub-Chapter</button>
+      <button class="btn btn-outline w-100" data-act="chf.subAdd" style="border-style:dashed;color:var(--primary-strong)">${ic('plus-circle')} Tambah Sub-bab / Topik</button>
       ${err('subs')}
     </div>
     <div class="inset d-flex flex-wrap gap-3 align-items-center justify-content-between mt-3" style="background:var(--surface-pure);border:1px solid var(--border)">
-      <div><b class="d-block">Prediksi Waktu Pembelajaran <span class="req" style="color:var(--rose)">*</span></b><span class="fs-sm text-2">Durasi implementasi materi berdasarkan kalender akademik (1–20 minggu)</span></div>
-      <div class="d-flex align-items-center gap-3"><div class="stepper-num"><button data-act="chf.weeks" data-d="-1" aria-label="Kurangi">−</button><input type="number" min="1" max="20" data-cf="prediksi_minggu" value="${f.prediksi_minggu}" aria-label="Prediksi minggu"><button data-act="chf.weeks" data-d="1" aria-label="Tambah">+</button></div>
-        <div class="fs-sm"><b class="d-block">Minggu Efektif</b><span class="text-2">Total ${jp} JP · target ${f.prediksi_minggu * cfg('sesi_per_minggu', 2)} sesi</span></div></div>
-    </div>${err('prediksi_minggu')}
+      <div style="flex:1 1 260px"><b class="d-block">Jumlah Period Chapter <span class="req" style="color:var(--rose)">*</span></b><span class="fs-sm text-2">Berapa period yang dialokasikan untuk menuntaskan chapter ini. Lesson plan chapter nanti berisi pertemuan 1P/2P yang totalnya sama dengan angka ini.</span></div>
+      <div class="d-flex align-items-center gap-3 flex-wrap"><div class="stepper-num"><button data-act="chf.period" data-d="-1" aria-label="Kurangi">−</button><input type="number" min="1" max="300" data-cf="jumlah_period" value="${+f.jumlah_period || 1}" aria-label="Jumlah period" class="${errors.jumlah_period ? 'is-invalid' : ''}"><button data-act="chf.period" data-d="1" aria-label="Tambah">+</button></div>
+        <div class="fs-sm" id="cfBudget">${chfBudgetHtml(f)}</div></div>
+    </div>${err('jumlah_period')}
   </section>
 
   <section class="bld-card">
-    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">3</span><div><h3>Tujuan Pembelajaran (TP / LO)</h3><div class="sub">Capaian kompetensi esensial — akan dipanggil otomatis di Lesson Plan</div></div></div><span class="chip sky">${f.los.length} Indikator</span></div>
+    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">3</span><div><h3>Tujuan Pembelajaran (TP / LO)</h3><div class="sub">Tulis semua TP di chapter ini, lalu tentukan sub-bab/topik tempat setiap TP dicapai. Satu sub-bab boleh memiliki lebih dari satu TP.</div></div></div><span class="chip sky">${f.los.length} TP</span></div>
+    <div class="d-flex flex-wrap gap-2 mb-3" id="cfLoCov">${chfCoverageHtml(f)}</div>
     <div class="inset" id="cfLos">${f.los.map((l, i) => `<div class="card-x pure mb-3" style="padding:16px">
       <div class="d-flex flex-wrap gap-2 align-items-center mb-2"><span class="chip">${E(l.kode || 'TP-' + no + '.' + (i + 1))}</span>
+        <select class="form-select form-select-sm w-auto fs-sm fw-6 lo-sub ${errors['los' + i] ? 'is-invalid' : ''}" data-cflo="${i}" data-k="sub_id" aria-label="Sub-bab untuk TP ${i + 1}"><option value="">Pilih sub-bab…</option>${f.subs.map((s, si) => `<option value="${E(s.sub_id)}" ${l.sub_id === s.sub_id ? 'selected' : ''}>Sub-bab ${E(no)}.${si + 1}${s.nama_sub.trim() ? ' · ' + E(s.nama_sub.trim().slice(0, 50)) : ''}</option>`).join('')}</select>
         <select class="form-select form-select-sm w-auto border-0 fs-xs text-2" style="min-height:30px;background-color:transparent" data-cflo="${i}" data-k="ranah" aria-label="Ranah">${RANAH.map(r => `<option ${l.ranah === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
         <span class="ms-auto rt-bar border-0 p-0 bg-transparent" role="toolbar" aria-label="Format teks">${[['bold', 'type-bold', 'Tebal'], ['italic', 'type-italic', 'Miring'], ['underline', 'type-underline', 'Garis bawah'], ['insertUnorderedList', 'list-ul', 'Daftar'], ['insertOrderedList', 'list-ol', 'Penomoran'], ['createLink', 'link-45deg', 'Sisipkan tautan'], ['removeFormat', 'eraser', 'Hapus format']].map(b => `<button type="button" data-act="rt.cmd" data-cmd="${b[0]}" data-i="${i}" title="${b[2]}" aria-label="${b[2]}">${ic(b[1])}</button>`).join('')}</span></div>
       <div class="rt-edit ${errors['lo' + i] ? 'is-invalid' : ''}" contenteditable="true" data-cflo="${i}" data-k="teks_tp" data-placeholder="Peserta didik mampu…" role="textbox" aria-multiline="true" aria-label="Tujuan pembelajaran ${i + 1}" style="border-radius:var(--r-ctl)">${sanitizeRich(l.teks_tp)}</div>
-      ${errors['lo' + i] ? `<div class="field-err" data-err="lo${i}">${ic('exclamation-circle')} ${E(errors['lo' + i])}</div>` : ''}
+      ${errors['lo' + i] ? `<div class="field-err" data-err="lo${i}">${ic('exclamation-circle')} ${E(errors['lo' + i])}</div>` : ''}${errors['los' + i] ? `<div class="field-err" data-err="los${i}">${ic('exclamation-circle')} ${E(errors['los' + i])}</div>` : ''}
       <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mt-2"><input class="form-control form-control-sm border-0 bg-transparent fs-xs text-2 px-0" style="min-height:28px;max-width:320px" data-cflo="${i}" data-k="taksonomi" value="${E(l.taksonomi || '')}" placeholder="Target taksonomi (mis. C4 Menganalisis)" aria-label="Target taksonomi">
         <button class="link-btn fs-xs" style="color:var(--rose)" data-act="chf.loDel" data-i="${i}" ${f.los.length === 1 ? 'disabled' : ''}>${ic('trash3')} Hapus TP</button></div></div>`).join('')}
       <button class="btn btn-outline w-100" data-act="chf.loAdd" style="border-style:dashed;color:var(--primary-strong)">${ic('journal-plus')} + Tambah Tujuan Pembelajaran (TP)</button>${err('los')}
     </div>
   </section>
-  <section class="insight mb-2"><span class="icon-tile">${ic('clipboard2-check')}</span><div><b>Kepatuhan Kurikulum ICM</b><div class="fs-sm text-2">Analisis ini mencakup ${f.subs.filter(s => s.nama_sub.trim()).length} sub-bab dan ${f.los.filter(l => stripTags(l.teks_tp).length >= 10).length} TP siap pakai untuk ${E(termLabel(term))}.</div></div><span class="ms-auto chip ${Object.keys(errors).length ? 'rose' : 'green'}" id="cfStd">${Object.keys(errors).length ? ic('exclamation-circle') + ' Perlu dilengkapi' : ic('check-circle') + ' Standar Valid'}</span></section>
+  <section class="insight mb-2"><span class="icon-tile">${ic('clipboard2-check')}</span><div><b>Kepatuhan Kurikulum ICM</b><div class="fs-sm text-2">Analisis ini mencakup ${f.subs.filter(s => s.nama_sub.trim()).length} sub-bab, ${f.los.filter(l => stripTags(l.teks_tp).length >= 10).length} TP, dan ${+f.jumlah_period || 0} period untuk ${E(termLabel(term))}.</div></div><span class="ms-auto chip ${Object.keys(errors).length ? 'rose' : 'green'}" id="cfStd">${Object.keys(errors).length ? ic('exclamation-circle') + ' Perlu dilengkapi' : ic('check-circle') + ' Standar Valid'}</span></section>
   </div>
   <div class="sticky-bar"><span class="autosave" id="cfSaved">${ic('cloud-check')} ${S.form.savedAt ? 'Draft tersimpan otomatis ' + E(relTime(new Date(S.form.savedAt).toISOString())) : 'Isian disimpan otomatis di perangkat'}</span><span class="grow"></span>
     ${exist ? `<button class="btn btn-ghost" data-act="chf.toggle">${ic(chapterById(f.chapter_id).status === 'NONAKTIF' ? 'toggle-off' : 'toggle-on')} ${chapterById(f.chapter_id).status === 'NONAKTIF' ? 'Aktifkan' : 'Nonaktifkan'}</button>` : ''}
@@ -1285,6 +1334,19 @@ function chapterFormHtml() {
     <button class="btn btn-primary" data-act="chf.save">${ic('check2')} Simpan Data</button></div>`;
 }
 
+/** Teks anggaran period (diperbarui langsung saat angka diketik, tanpa render ulang form). */
+function chfBudgetHtml(f) {
+  const t = termById(f.term_id), b = termBudget(t, f.unit, f.mata_pelajaran, f.kelas), jp = +f.jumlah_period || 0;
+  if (!f.mata_pelajaran || !f.kelas) return `<span class="text-2">Pilih mapel & kelas untuk melihat anggaran period term.</span>`;
+  if (!b.total) return `<b class="d-block">Anggaran term belum diatur</b><span class="text-2">Period/minggu ${E(refLabel('SUBJECT', f.mata_pelajaran))} ${E(gradeLabel(f.kelas))} belum diisi QA.</span>`;
+  const used = usedPeriods(f.term_id, f.mata_pelajaran, f.kelas, f.chapter_id), left = b.total - used - jp;
+  return `<b class="d-block">Anggaran term: ${b.total} period</b><span class="text-2">${b.weeks} minggu × ${b.ppm} period/minggu · chapter lain ${used}</span><div class="fw-7 mt-1" style="color:${left < 0 ? 'var(--rose)' : left === 0 ? 'var(--green)' : 'var(--primary-strong)'}">${left < 0 ? ic('exclamation-triangle') + ' Lebih ' + (-left) + ' period dari anggaran' : left === 0 ? ic('check-circle') + ' Pas — seluruh anggaran terpetakan' : 'Sisa ' + left + ' period — harus dihabiskan oleh chapter lain hingga total tepat ' + b.total}</div>`;
+}
+/** Ringkasan cakupan TP per sub-bab. */
+function chfCoverageHtml(f) {
+  const no = S.form && S.form.exist ? (String((chapterById(f.chapter_id) || {}).kode || '').replace(/\D/g, '') || '1') : String(chaptersInTerm(f.term_id).length + 1);
+  return f.subs.map((s, i) => { const n = f.los.filter(l => l.sub_id === s.sub_id).length; return `<span class="chip ${n ? 'green' : 'amber'}" title="${E(s.nama_sub)}">${n ? ic('check2') : ic('exclamation-circle')} ${E(no)}.${i + 1} · ${n} TP</span>`; }).join('');
+}
 function chfRerender() { const y = window.scrollY; $('#chForm').innerHTML = chapterFormHtml(); window.scrollTo(0, y); }
 const chfLocalSave = debounce(() => { if (!S.form) return; S.form.savedAt = Date.now(); LS.set(S.form.key, { f: S.form.f, at: S.form.savedAt }); const el = $('#cfSaved'); if (el) el.innerHTML = ic('cloud-check') + ' Draft tersimpan otomatis baru saja'; }, 500);
 
@@ -1304,22 +1366,24 @@ document.addEventListener('input', e => {
   if (t.dataset.cfsub != null && t.value.trim()) chfClearErr('subs');
   if (t.dataset.cflo != null && t.isContentEditable) { const n = stripTags(t.innerHTML).length; if (n) chfClearErr('los'); if (n >= 10) chfClearErr('lo' + t.dataset.cflo, t); }
   if (t.dataset.cf) {
-    f[t.dataset.cf] = t.dataset.cf === 'prediksi_minggu' ? Math.max(1, Math.min(20, +t.value || 1)) : t.value;
+    f[t.dataset.cf] = t.dataset.cf === 'jumlah_period' ? Math.max(0, Math.min(300, +t.value || 0)) : t.value;
     if (t.dataset.cf === 'nama_chapter') { const c = $('#cfNamaCnt'); if (c) c.textContent = t.value.length + '/150 karakter'; }
-    if (t.tagName === 'SELECT' || t.dataset.cf === 'prediksi_minggu') { if (t.dataset.cf === 'unit') f.kelas = ''; chfRerender(); }
+    if (t.dataset.cf === 'jumlah_period') { const bx = $('#cfBudget'); if (bx) bx.innerHTML = chfBudgetHtml(f); const ch = $('#cfJpChip'); if (ch) ch.textContent = f.jumlah_period; if (f.jumlah_period >= 1) chfClearErr('jumlah_period', t); }
+    if (t.tagName === 'SELECT') { if (t.dataset.cf === 'unit') f.kelas = ''; chfRerender(); }
     chfLocalSave();
   } else if (t.dataset.cfsub != null) { f.subs[+t.dataset.cfsub].nama_sub = t.value; chfLocalSave(); }
+  else if (t.dataset.cflo != null && t.dataset.k === 'sub_id') { f.los[+t.dataset.cflo].sub_id = t.value; if (t.value) chfClearErr('los' + t.dataset.cflo, t); const cv = $('#cfLoCov'); if (cv) cv.innerHTML = chfCoverageHtml(f); chfLocalSave(); }
   else if (t.dataset.cflo != null) { const lo = f.los[+t.dataset.cflo]; lo[t.dataset.k] = t.isContentEditable ? t.innerHTML : t.value; chfLocalSave(); }
 });
-document.addEventListener('change', e => { if (S.form && e.target.tagName === 'SELECT' && e.target.dataset.cflo != null) { S.form.f.los[+e.target.dataset.cflo].ranah = e.target.value; chfLocalSave(); } });
+document.addEventListener('change', e => { if (S.form && e.target.tagName === 'SELECT' && e.target.dataset.cflo != null && e.target.dataset.k === 'ranah') { S.form.f.los[+e.target.dataset.cflo].ranah = e.target.value; chfLocalSave(); } });
 
 Object.assign(ACT, {
   'chf.subAdd': () => { S.form.f.subs.push({ sub_id: uid(), nama_sub: '' }); chfRerender(); const ins = $$('[data-cfsub]'); ins[ins.length - 1].focus(); },
-  'chf.subDel': el => { S.form.f.subs.splice(+el.dataset.i, 1); chfRerender(); chfLocalSave(); },
+  'chf.subDel': el => { const f = S.form.f, gone = f.subs.splice(+el.dataset.i, 1)[0]; f.los.forEach(l => { if (gone && l.sub_id === gone.sub_id) l.sub_id = ''; }); chfRerender(); chfLocalSave(); },
   'chf.subMove': el => { const a = S.form.f.subs, i = +el.dataset.i, j = i + (+el.dataset.d); if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; chfRerender(); chfLocalSave(); },
-  'chf.loAdd': () => { S.form.f.los.push({ lo_id: uid(), teks_tp: '', ranah: RANAH[0], taksonomi: '' }); chfRerender(); const ed = $$('.rt-edit'); ed[ed.length - 1].focus(); },
+  'chf.loAdd': () => { const f = S.form.f, last = f.los[f.los.length - 1]; f.los.push({ lo_id: uid(), teks_tp: '', ranah: RANAH[0], taksonomi: '', sub_id: last && last.sub_id ? last.sub_id : (f.subs[0] || {}).sub_id || '' }); chfRerender(); const ed = $$('.rt-edit'); ed[ed.length - 1].focus(); },
   'chf.loDel': el => { S.form.f.los.splice(+el.dataset.i, 1); chfRerender(); chfLocalSave(); },
-  'chf.weeks': el => { const f = S.form.f; f.prediksi_minggu = Math.max(1, Math.min(20, (+f.prediksi_minggu || 1) + (+el.dataset.d))); chfRerender(); chfLocalSave(); },
+  'chf.period': el => { const f = S.form.f; f.jumlah_period = Math.max(1, Math.min(300, (+f.jumlah_period || 1) + (+el.dataset.d))); const i = $('[data-cf="jumlah_period"]'); if (i) i.value = f.jumlah_period; const bx = $('#cfBudget'); if (bx) bx.innerHTML = chfBudgetHtml(f); const ch = $('#cfJpChip'); if (ch) ch.textContent = f.jumlah_period; chfClearErr('jumlah_period', i); chfLocalSave(); },
   'rt.cmd': el => {
     const ed = $(`.rt-edit[data-cflo="${el.dataset.i}"]`); if (!ed) return;
     ed.focus();
@@ -1348,20 +1412,21 @@ Object.assign(ACT, {
     const subs = f.subs.filter(s => s.nama_sub.trim());
     if (!subs.length) errs.subs = 'Tambahkan minimal satu sub-chapter.';
     const seen = {}; subs.forEach(s => { const k = s.nama_sub.trim().toLowerCase(); if (seen[k]) errs.subs = 'Sub-chapter tidak boleh kembar dalam satu chapter.'; seen[k] = 1; });
-    if (!(f.prediksi_minggu >= 1 && f.prediksi_minggu <= 20)) errs.prediksi_minggu = 'Isi prediksi waktu antara 1 sampai 20 minggu.';
+    if (!(f.jumlah_period >= 1 && f.jumlah_period <= 300)) errs.jumlah_period = 'Isi jumlah period chapter (1–300).';
+    else { const b = termBudget(term, f.unit, f.mata_pelajaran, f.kelas), used = usedPeriods(f.term_id, f.mata_pelajaran, f.kelas, f.chapter_id); const st = S.form.exist ? (chapterById(f.chapter_id) || {}).status : 'AKTIF'; if (b.total && st !== 'NONAKTIF' && used + f.jumlah_period > b.total) errs.jumlah_period = `Melebihi anggaran term: chapter lain sudah ${used} dari ${b.total} period, sisa ${Math.max(0, b.total - used)} period.`; }
     const los = f.los.filter(l => stripTags(l.teks_tp));
     if (!los.length) errs.los = 'Tambahkan minimal satu Tujuan Pembelajaran.';
-    f.los.forEach((l, i) => { const n = stripTags(l.teks_tp).length; if (n && n < 10) errs['lo' + i] = 'TP minimal 10 karakter.'; });
+    f.los.forEach((l, i) => { const n = stripTags(l.teks_tp).length; if (n && n < 10) errs['lo' + i] = 'TP minimal 10 karakter.'; if (n && !subs.some(s => s.sub_id === l.sub_id)) errs['los' + i] = 'Pilih sub-bab/topik untuk TP ini.'; });
     S.form.errors = errs;
     if (Object.keys(errs).length) { chfRerender(); toast('warning', 'Lengkapi isian wajib', Object.keys(errs).length + ' isian perlu diperbaiki.', { page: 1, id: 'val' }); const first = $('.is-invalid, .field-err'); first && first.scrollIntoView({ behavior: 'smooth', block: 'center' }); return; }
     // ── Optimistic: update state & UI dulu, kirim ke server di latar ──
     const prev = S.form.exist ? clone(chapterById(f.chapter_id)) : null;
-    const payload = { chapter_id: f.chapter_id, term_id: f.term_id, unit: f.unit, mata_pelajaran: f.mata_pelajaran, kelas: f.kelas, nama_chapter: f.nama_chapter.trim(), prediksi_minggu: +f.prediksi_minggu, subs: subs.map(s => ({ sub_id: s.sub_id, nama_sub: s.nama_sub.trim() })), los: los.map(l => ({ lo_id: l.lo_id, teks_tp: sanitizeRich(l.teks_tp), ranah: l.ranah, taksonomi: l.taksonomi })) };
+    const payload = { chapter_id: f.chapter_id, term_id: f.term_id, unit: f.unit, mata_pelajaran: f.mata_pelajaran, kelas: f.kelas, nama_chapter: f.nama_chapter.trim(), jumlah_period: +f.jumlah_period, subs: subs.map(s => ({ sub_id: s.sub_id, nama_sub: s.nama_sub.trim() })), los: los.map(l => ({ lo_id: l.lo_id, teks_tp: sanitizeRich(l.teks_tp), ranah: l.ranah, taksonomi: l.taksonomi, sub_id: l.sub_id })) };
     const kode = prev ? prev.kode : 'CH-' + String(chaptersInTerm(f.term_id).length + 1).padStart(2, '0'), no = kode.replace(/\D/g, '');
     const oldLo = byKey(prev ? prev.los : [], 'lo_id'); let maxN = 0; (prev ? prev.los : []).forEach(l => { const m = /\.(\d+)$/.exec(l.kode || ''); if (m) maxN = Math.max(maxN, +m[1]); });
     const optimistic = Object.assign({}, prev || { user_id: S.me.user_id, status: 'AKTIF', dibuat_pada: '' }, payload, {
       kode, subs: payload.subs.map((s, i) => ({ sub_id: s.sub_id, kode: no + '.' + (i + 1), nama_sub: s.nama_sub, aktif: true })),
-      los: payload.los.map(l => ({ lo_id: l.lo_id, kode: oldLo[l.lo_id] ? oldLo[l.lo_id].kode : 'TP-' + no + '.' + (++maxN), teks_tp: l.teks_tp, ranah: l.ranah, taksonomi: l.taksonomi, aktif: true })),
+      los: payload.los.map(l => ({ lo_id: l.lo_id, kode: oldLo[l.lo_id] ? oldLo[l.lo_id].kode : 'TP-' + no + '.' + (++maxN), teks_tp: l.teks_tp, ranah: l.ranah, taksonomi: l.taksonomi, sub_id: l.sub_id, aktif: true })),
       diubah_pada: nowIso()
     });
     if (prev) { const keep = (prev.subs || []).filter(s => !payload.subs.some(x => x.sub_id === s.sub_id)); const keepL = (prev.los || []).filter(l => !payload.los.some(x => x.lo_id === l.lo_id)); if (lpsOfChapter(prev.chapter_id).length) { optimistic.subs = optimistic.subs.concat(keep.map(s => Object.assign({}, s, { aktif: false }))); optimistic.los = optimistic.los.concat(keepL.map(l => Object.assign({}, l, { aktif: false }))); } }
@@ -1372,7 +1437,7 @@ Object.assign(ACT, {
     LS.del(S.form.key);
     persist();
     toast('success', 'Analisis Chapter tersimpan', kode + ' · ' + payload.nama_chapter + ' — status Tersimpan, tombol Edit aktif.');
-    if (el.dataset.next === 'lp') go('builder', { chapter: f.chapter_id }); else go('chapters');
+    if (el.dataset.next === 'lp') { const lp = lpOfChapter(f.chapter_id); if (lp) go(isEditable(lp) ? 'builder' : 'lp-view', { id: lp.lp_id }); else go('builder', { chapter: f.chapter_id }); } else go('chapters');
   }
 });
 
@@ -1403,13 +1468,13 @@ PAGES.lps = {
     </div>
     <div class="tabs" role="tablist">${tab('ALL', 'Semua', all.length)}${tab('RETURNED', 'Perlu Revisi', cnt('RETURNED'), true)}${tab('PENDING', 'Menunggu Review', cnt('PENDING'))}${tab('APPROVED', 'Disetujui', cnt('APPROVED'))}${tab('DRAFT', 'Draf', cnt('DRAFT'))}</div>
     <section class="card-x flush pure mb-4">
-      <div class="filter-bar"><div class="input-icon search">${ic('search')}<input class="form-control" data-f="lp.q" value="${E(u.q)}" placeholder="Cari judul sesi, sub-chapter, kode, atau catatan revisi…" aria-label="Cari lesson plan"></div>
+      <div class="filter-bar"><div class="input-icon search">${ic('search')}<input class="form-control" data-f="lp.q" value="${E(u.q)}" placeholder="Cari chapter, sub-bab, kode, atau catatan revisi…" aria-label="Cari lesson plan"></div>
         <select class="form-select" data-f="lp.ch" aria-label="Filter chapter"><option value="">Semua Chapter</option>${chs.map(c => `<option value="${c.chapter_id}" ${u.ch === c.chapter_id ? 'selected' : ''}>${E(c.kode + ' · ' + c.nama_chapter)}</option>`).join('')}</select></div>
-      ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Sesi & Bab Pokok</th><th>Materi / Sub-chapter</th><th>Tanggal & Durasi</th><th>Versi</th><th>Status</th><th class="text-end">Aksi</th></tr></thead><tbody>
+      ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Chapter</th><th>Sub-bab / Catatan</th><th>Pertemuan & Period</th><th>Versi</th><th>Status</th><th class="text-end">Aksi</th></tr></thead><tbody>
       ${slice.map(l => `<tr class="st-${l.status} clickable" data-act="lp.open" data-id="${E(l.lp_id)}">
-        <td class="lb col-main" data-label="Sesi & Bab"><div class="t-title">${E(lpTitle(l))} ${unsyncedBadge('lp:' + l.lp_id)}</div><div class="t-sub">${E(l.kode_dok || 'Kode dibuat saat sinkron')} · Term ${E(termById(l.term_id) ? termById(l.term_id).term : '')}</div></td>
+        <td class="lb col-main" data-label="Chapter"><div class="t-title">${E(lpTitle(l))} ${unsyncedBadge('lp:' + l.lp_id)}</div><div class="t-sub">${E(l.kode_dok || 'Kode dibuat saat sinkron')} · Term ${E(termById(l.term_id) ? termById(l.term_id).term : '')}</div></td>
         <td data-label="Materi" style="max-width:300px"><div class="fw-6 clamp-1">${E(l.sub_label || '—')}</div>${l.status === 'RETURNED' ? `<div class="t-sub clamp-2" style="color:var(--st-returned)">${ic('chat-square-quote')} Catatan: ${E(l.catatan_terakhir)}</div>` : l.status === 'PENDING' ? `<div class="t-sub">${ic('clock-history')} Menunggu ${E(fmtWait(l.submitted_at))}</div>` : l.status === 'APPROVED' ? `<div class="t-sub">${ic('check-circle')} Siap dicetak & diajarkan</div>` : `<div class="t-sub">${ic('pencil')} Diubah ${E(relTime(l.diubah_pada))}</div>`}</td>
-        <td data-label="Tanggal & Durasi" class="text-nowrap"><div class="fw-6">${E(l.tanggal_ajar ? fmtTanggal(l.tanggal_ajar) : 'Belum dijadwalkan')}</div><div class="t-sub">${E(l.durasi_total || 0)} menit</div></td>
+        <td data-label="Pertemuan & Period" class="text-nowrap"><div class="fw-6">${E(lpMeta(l))}</div><div class="t-sub">${(() => { const ch = chapterById(l.chapter_id), tp = ch ? +ch.jumlah_period || 0 : 0, pp = lpPeriods(l); return tp ? (pp === tp ? ic('check2') + ' sesuai chapter (' + tp + ')' : 'chapter ' + tp + ' period') : E(l.durasi_total || 0) + ' menit'; })()}</div></td>
         <td data-label="Versi"><span class="chip ${l.status === 'APPROVED' ? 'green' : 'gray'}">${l.status === 'APPROVED' ? 'Final (v' + E(l.revisi_ke) + ')' : 'Rev. ' + E(l.revisi_ke)}</span></td>
         <td data-label="Status">${pill(l.status)}</td>
         <td class="text-end cell-actions"><div class="d-inline-flex gap-1 align-items-center">${l.status === 'RETURNED' ? `<button class="btn btn-amber btn-sm" data-go="builder" data-p-id="${E(l.lp_id)}">${ic('pencil')} Buka & Revisi</button>` : l.status === 'DRAFT' ? `<button class="btn btn-soft btn-sm" data-go="builder" data-p-id="${E(l.lp_id)}">${ic('pencil')} Lanjutkan</button>` : l.status === 'APPROVED' ? `<button class="btn btn-soft btn-sm" data-act="lp.pdf" data-id="${E(l.lp_id)}" data-mode="final">${ic('download')} Unduh</button>` : `<button class="btn btn-soft btn-sm" data-go="lp-view" data-p-id="${E(l.lp_id)}">${ic('eye')} Lihat</button>`}
@@ -1427,6 +1492,10 @@ Object.assign(ACT, {
   'lp.open': el => { const l = lpById(el.dataset.id); if (!l) return; go(isEditable(l) && isRole('TEACHER') ? 'builder' : 'lp-view', { id: l.lp_id }); },
   'lp.new': () => {
     const t = activeTerm();
+    if (t && chaptersInTerm(t.term_id).filter(c => c.status === 'AKTIF').length && !chaptersWithoutLp(t.term_id).length) {
+      modal({ title: 'Semua chapter sudah punya lesson plan', html: `<div class="mdl-head"><div class="d-flex gap-3"><span class="icon-tile">${ic('check2-all')}</span><div><h3>Semua chapter sudah memiliki lesson plan</h3><p class="text-2 mt-1 mb-0">Lesson plan disusun satu per chapter. Untuk menambah pertemuan, buka lesson plan chapter yang bersangkutan. Untuk materi baru, tambahkan chapter di Analisis Chapter.</p></div></div></div><div class="mdl-foot"><button class="btn btn-ghost" data-close>Tutup</button><button class="btn btn-primary" data-close data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button></div>` });
+      return;
+    }
     if (!t || !chaptersInTerm(t.term_id).filter(c => c.status === 'AKTIF').length) {
       modal({ title: 'Analisis Chapter diperlukan', html: `<div class="mdl-head"><div class="d-flex gap-3"><span class="icon-tile amber">${ic('journal-x')}</span><div><h3>Buat Analisis Chapter dulu</h3><p class="text-2 mt-1 mb-0">Lesson plan hanya dapat dibuat bila Anda sudah memiliki minimal satu Analisis Chapter tersimpan pada term aktif. TP/LO yang Anda pilih nanti diambil dari sana.</p></div></div></div><div class="mdl-foot"><button class="btn btn-ghost" data-close>Nanti</button><button class="btn btn-primary" data-close data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button></div>` });
       return;
@@ -1437,7 +1506,6 @@ Object.assign(ACT, {
     const l = lpById(el.dataset.id); if (!l) return;
     popMenu(el, `<button class="mi" data-go="lp-view" data-p-id="${E(l.lp_id)}">${ic('eye')}Lihat dokumen & riwayat</button>
       <button class="mi" data-act="lp.pdf" data-id="${E(l.lp_id)}" data-mode="${l.status === 'APPROVED' ? 'final' : 'draft'}">${ic('filetype-pdf')}Unduh ${l.status === 'APPROVED' ? 'PDF resmi' : 'draf PDF'}</button>
-      <button class="mi" data-act="lp.dup" data-id="${E(l.lp_id)}">${ic('copy')}Duplikat ke sesi berikutnya</button>
       ${l.status === 'DRAFT' ? `<div class="sep"></div><button class="mi" data-act="lp.del" data-id="${E(l.lp_id)}" style="color:var(--rose)">${ic('trash3')}Hapus draft</button>` : ''}`);
   },
   'lp.del': async el => {
@@ -1448,19 +1516,6 @@ Object.assign(ACT, {
     S.lps = S.lps.filter(x => x.lp_id !== l.lp_id); LS.del('draft:' + l.lp_id);
     if (!l.kode_dok) Outbox.drop('lp:' + l.lp_id); else Outbox.push('lp.delete', { lp_id: l.lp_id }, { key: 'lp:' + l.lp_id, prev });
     persist(); renderRoute(false); toast('success', 'Draft dihapus', lpTitle(l));
-  },
-  'lp.dup': el => {
-    closeMenu();
-    const src = lpById(el.dataset.id); if (!src) return;
-    const open = full => {
-      const ch = chapterById(full.chapter_id), used = {}; lpsOfChapter(full.chapter_id).forEach(x => { used[x.session_no] = 1; });
-      let s = 1; while (used[s]) s++;
-      const copy = Object.assign(clone(full), { lp_id: uid(), session_no: s, status: 'DRAFT', revisi_ke: 1, jumlah_return: 0, catatan_terakhir: '', reviewer_terakhir: '', kode_dok: '', verif_code: '', submitted_at: '', decided_at: '', decided_by: '', tanggal_ajar: '', dibuat_pada: '', diubah_pada: nowIso(), full: true });
-      LS.set('draft:' + copy.lp_id, { lp: copy, at: Date.now() });
-      toast('info', 'Salinan dibuat', `Sesi ${s} · ${ch ? ch.nama_chapter : ''} — periksa lalu simpan.`);
-      go('builder', { id: copy.lp_id, fresh: '1' });
-    };
-    if (src.full) open(src); else { toast('info', 'Memuat isi lesson plan…', ''); call('lp.get', { lp_id: src.lp_id }).then(d => open(d.lp)).catch(e => toast('error', 'Gagal memuat', e.message)); }
   },
   'lp.pdf': (el) => {
     closeMenu();
@@ -1477,31 +1532,59 @@ Object.assign(ACT, {
 // ════════════════════════════════════════════════════════════
 const STEPS = [
   { t: 'Identitas & Bab', i: 'journal-bookmark' }, { t: 'TP & Nilai ICM', i: 'bullseye' }, { t: 'Diferensiasi', i: 'grid-3x3-gap' },
-  { t: 'Skenario & Waktu', i: 'clock-history' }, { t: 'Lampiran & Kirim', i: 'send' }
+  { t: 'Pertemuan & Skenario', i: 'clock-history' }, { t: 'Lampiran & Kirim', i: 'send' }
 ];
-const CONTENT_KEYS = ['chapter_id', 'sub_ids', 'session_no', 'tanggal_ajar', 'lo_ids', 'atp_micro_lo', 'icm', 'seq', 'diff', 'essential_question', 'terminology', 'scenarios', 'alok_kode'];
+const CONTENT_KEYS = ['chapter_id', 'atp_micro_lo', 'icm', 'seq', 'diff', 'essential_question', 'terminology', 'sessions'];
 const SCEN = [
-  { k: 'beginning', key: 'A', t: 'Kegiatan Awal (Beginning)', s: 'Apersepsi, motivasi, dan orientasi tujuan', ph: 'Pembukaan, salam, apersepsi, pembacaan tujuan pembelajaran & orientasi materi…' },
+  { k: 'beginning', key: 'A', t: 'Pendahuluan (Beginning)', s: 'Apersepsi, motivasi, dan orientasi tujuan', ph: 'Pembukaan, salam, apersepsi, pembacaan tujuan pembelajaran & orientasi materi…' },
   { k: 'middle', key: 'B', t: 'Kegiatan Inti (Middle)', s: 'Mini lesson, praktik terbimbing, diskusi kelompok', ph: 'Penyampaian mini lesson / konsep utama, aktivitas diskusi kelompok / praktik mandiri, umpan balik langsung…' },
-  { k: 'end', key: 'C', t: 'Kegiatan Penutup (End)', s: 'Refleksi, kesimpulan, dan tindak lanjut', ph: 'Refleksi bersama & kesimpulan, asesmen formatif, penginstruksian tugas / tindak lanjut sesi berikutnya…' }
+  { k: 'end', key: 'C', t: 'Penutup (End)', s: 'Refleksi, kesimpulan, dan tindak lanjut', ph: 'Refleksi bersama & kesimpulan, asesmen formatif, penginstruksian tugas / tindak lanjut sesi berikutnya…' }
 ];
 const ALLOWED_ATT = { pdf: 1, docx: 1, pptx: 1 };
 
-function emptyLp(chapterId, session) {
-  // Alokasi awal: ikuti lesson plan terakhir di chapter yang sama (guru biasanya konsisten per mapel), lalu bawaan unit.
-  const ch = chapterById(chapterId) || {}, last = lpsOfChapter(chapterId || '').slice().sort((a, b) => ts(b.diubah_pada) - ts(a.diubah_pada)).find(l => l.alok_kode);
-  const opts = periodOpts(ch.unit), a = (last && opts.find(o => o.kode === last.alok_kode)) || opts[0], d = defScen(a ? a.menit : 80);
+/** Susun pertemuan otomatis dari period chapter: 2P bila mapel ≥ 4 period/minggu (atau tidak diatur), sisanya 1P; topik dibagi berurutan. */
+function genSessions(ch) {
+  if (!ch || !ch.chapter_id) return [];
+  const opts = periodOpts(ch.unit), one = opts.find(o => periodCount(o, ch.unit) === 1), two = opts.find(o => periodCount(o, ch.unit) === 2);
+  const ppm = subjPeriod(ch.unit, ch.mata_pelajaran, ch.kelas), P = Math.max(1, +ch.jumlah_period || 1), subs = activeSubs(ch);
+  const slots = [];
+  let left = P;
+  while (left > 0 && slots.length < 60) { const use2 = two && left >= 2 && (ppm === 0 || ppm >= 4 || !one); const o = use2 ? two : (one || two || opts[0]); if (!o) break; slots.push(o); left -= Math.max(1, periodCount(o, ch.unit)); }
+  const los = activeLos(ch), n = los.length;
+  return slots.map((o, i) => {
+    const d = defScen(o.menit), st = n ? Math.min(n - 1, Math.floor(i * n / slots.length)) : 0, en = n ? Math.max(st + 1, Math.floor((i + 1) * n / slots.length)) : 0;
+    const se = { id: uid(), tanggal: '', lo_ids: los.slice(st, en).map(l => l.lo_id), sub_ids: [], alok_kode: o.kode, scenarios: { beginning: { menit: d.beginning, desc: '' }, middle: { menit: d.middle, desc: '' }, end: { menit: d.end, desc: '' } } };
+    syncSesSubs(se, ch); return se;
+  });
+}
+/** Sub-bab sebuah pertemuan mengikuti TP yang dipilih (urutan sub-bab chapter). */
+function syncSesSubs(se, ch) {
+  const subOf = {}; activeLos(ch).forEach(l => { subOf[l.lo_id] = l.sub_id; });
+  se.lo_ids = (se.lo_ids || []).filter(x => subOf[x] !== undefined);
+  se.sub_ids = activeSubs(ch).filter(sb => se.lo_ids.some(x => subOf[x] === sb.sub_id)).map(sb => sb.sub_id);
+}
+/** Lesson plan format lama (pertemuan hanya berisi sub-bab): ambil semua TP pada sub-bab itu. */
+function ensureSesLos(lp, ch) {
+  (lp.sessions || []).forEach(se => { if (!se.lo_ids || !se.lo_ids.length) { se.lo_ids = (se.sub_ids || []).length ? activeLos(ch).filter(l => se.sub_ids.indexOf(l.sub_id) >= 0).map(l => l.lo_id) : []; } syncSesSubs(se, ch); });
+}
+/** TP chapter yang belum masuk ke pertemuan mana pun. */
+function uncoveredLos(lp, ch) { const c = {}; (lp.sessions || []).forEach(se => (se.lo_ids || []).forEach(x => { c[x] = 1; })); return activeLos(ch).filter(l => !c[l.lo_id]); }
+function newSession(ch, kode) {
+  const o = periodOpts(ch.unit).find(x => x.kode === kode) || periodOpts(ch.unit)[0], d = defScen(o ? o.menit : 80);
+  return { id: uid(), tanggal: '', lo_ids: [], sub_ids: [], alok_kode: o ? o.kode : '', scenarios: { beginning: { menit: d.beginning, desc: '' }, middle: { menit: d.middle, desc: '' }, end: { menit: d.end, desc: '' } } };
+}
+function emptyLp(chapterId) {
+  const ch = chapterById(chapterId) || {};
   return {
-    lp_id: uid(), chapter_id: chapterId || '', sub_ids: [], session_no: session || 0, tanggal_ajar: '', lo_ids: [], atp_micro_lo: '', icm: [], seq: [], diff: [],
-    essential_question: '', terminology: '', scenarios: { beginning: { menit: d.beginning, desc: '' }, middle: { menit: d.middle, desc: '' }, end: { menit: d.end, desc: '' } },
-    alok_kode: a ? a.kode : '', status: 'DRAFT', revisi_ke: 1, kode_dok: '', catatan_terakhir: '', reviewer_terakhir: '', jumlah_return: 0, full: true, _new: true
+    lp_id: uid(), chapter_id: chapterId || '', atp_micro_lo: '', icm: [], seq: [], diff: [], essential_question: '', terminology: '', sessions: genSessions(ch),
+    status: 'DRAFT', revisi_ke: 1, kode_dok: '', catatan_terakhir: '', reviewer_terakhir: '', jumlah_return: 0, full: true, _new: true
   };
 }
-function nextFreeSession(chId, exceptId) {
-  const used = {}; lpsOfChapter(chId).forEach(l => { if (l.lp_id !== exceptId) used[l.session_no] = 1; });
-  let s = 1; while (used[s]) s++; return s;
-}
 const scenTotal = sc => (+sc.beginning.menit || 0) + (+sc.middle.menit || 0) + (+sc.end.menit || 0);
+const lpTotalMin = lp => sum((lp.sessions || []).map(sesMinutes));
+const lpPlannedPeriods = (lp, ch) => sum((lp.sessions || []).map(se => periodCount(sesAlok(se, ch.unit), ch.unit)));
+/** Chapter aktif yang belum punya LP (atau milik LP ini). */
+const chaptersForLp = (termId, lpId) => chaptersInTerm(termId).filter(c => c.status === 'AKTIF').map(c => ({ c, other: lpsOfChapter(c.chapter_id).find(l => l.lp_id !== lpId) }));
 
 PAGES.builder = {
   title: 'Lesson Plan Builder', roles: ['TEACHER'], noAutoRefresh: true,
@@ -1522,17 +1605,22 @@ PAGES.builder = {
         S.builder = null;
         return emptyState('journal-x', 'Buat Analisis Chapter terlebih dahulu', 'Lesson plan hanya dapat dibuat bila Anda sudah memiliki minimal satu Analisis Chapter tersimpan pada term aktif. TP/LO di Lesson Plan diambil langsung dari sana.', `<button class="btn btn-primary" data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button>`);
       }
-      const ch = chapterById(p.chapter) && chapterById(p.chapter).status === 'AKTIF' ? chapterById(p.chapter) : activeChs[0];
-      lp = emptyLp(ch.chapter_id, +p.session || nextFreeSession(ch.chapter_id));
-      if (activeSubs(ch).length === 1) lp.sub_ids = [activeSubs(ch)[0].sub_id];
+      // Satu LP per chapter: bila chapter yang diminta sudah punya LP, buka LP itu
+      const want = chapterById(p.chapter), existing = want ? lpOfChapter(want.chapter_id) : null;
+      if (existing) { S.builder = { redirect: existing.lp_id, edit: isEditable(existing) }; return skeletonPage(); }
+      const free = activeChs.filter(c => !lpOfChapter(c.chapter_id));
+      if (!free.length) { S.builder = null; return emptyState('check2-all', 'Semua chapter sudah memiliki lesson plan', 'Lesson plan disusun satu per chapter. Buka lesson plan chapter yang bersangkutan untuk menambah pertemuan, atau tambahkan chapter baru.', `<button class="btn btn-soft" data-go="lps">Daftar Lesson Plan</button> <button class="btn btn-primary" data-go="chapter-form">${ic('plus-lg')} Tambah Analisis Chapter</button>`); }
+      const ch = want && want.status === 'AKTIF' ? want : free[0];
+      lp = emptyLp(ch.chapter_id);
     }
-    lp.scenarios = lp.scenarios || emptyLp().scenarios;
-    S.builder = { lp, step: Math.min(5, Math.max(1, +p.step || (lp.status === 'RETURNED' ? 1 : 1))), dirty: !!(draft && p.fresh), errs: {}, tried: false, localAt: draft ? draft.at : 0, serverAt: known ? ts(known.diubah_pada) : 0, timer: null, state: 'idle' };
+    if (!lp.sessions) lp.sessions = [];
+    { const c0 = chapterById(lp.chapter_id); if (c0) ensureSesLos(lp, c0); }
+    S.builder = { lp, step: Math.min(5, Math.max(1, +p.step || 1)), dirty: !!(draft && p.fresh), errs: {}, tried: false, localAt: draft ? draft.at : 0, serverAt: known ? ts(known.diubah_pada) : 0, timer: null, state: 'idle', open: 0 };
     return `<div id="bld">${builderHtml()}</div>`;
   },
   mount(p) {
     const b = S.builder;
-    if (b && b.redirect) { go('lp-view', { id: b.redirect }, { replace: true }); return; }
+    if (b && b.redirect) { go(b.edit ? 'builder' : 'lp-view', { id: b.redirect }, { replace: true }); return; }
     if (b && b.loading) {
       call('lp.get', { lp_id: b.loading }).then(d => { upsertLp(Object.assign({}, d.lp, { full: true })); S.detail[d.lp.lp_id] = d; if (S.route.name === 'builder' && S.route.params.id === d.lp.lp_id) renderRoute(false); })
         .catch(e => { toast('error', 'Gagal memuat lesson plan', e.message); go('lps', {}, { replace: true }); });
@@ -1552,10 +1640,13 @@ function upsertLp(obj) {
 /** Ringkasan optimistic untuk daftar/dashboard (label dihitung di klien). */
 function builderSummary(lp, extra) {
   const ch = chapterById(lp.chapter_id) || {};
-  const subMap = byKey(ch.subs || [], 'sub_id');
+  const subMap = byKey(ch.subs || [], 'sub_id'), used = {};
+  (lp.sessions || []).forEach(se => (se.sub_ids || []).forEach(x => { used[x] = 1; }));
+  const dates = (lp.sessions || []).map(se => se.tanggal).filter(Boolean).sort();
   return Object.assign({}, lp, {
-    user_id: S.me.user_id, term_id: ch.term_id, chapter_label: ch.nama_chapter || '', sub_label: (lp.sub_ids || []).map(x => subMap[x] ? subMap[x].kode + ' ' + subMap[x].nama_sub : '').filter(Boolean).join('; '),
-    unit: ch.unit, mata_pelajaran: ch.mata_pelajaran, kelas: ch.kelas, durasi_total: scenTotal(lp.scenarios), diubah_pada: nowIso(), dibuat_pada: lp.dibuat_pada || nowIso(), full: true
+    user_id: S.me.user_id, term_id: ch.term_id, chapter_label: ch.nama_chapter || '', sub_label: (ch.subs || []).filter(x => used[x.sub_id]).map(x => x.kode + ' ' + x.nama_sub).join('; '),
+    jumlah_sesi: (lp.sessions || []).length, tanggal_ajar: dates[0] || '', unit: ch.unit, mata_pelajaran: ch.mata_pelajaran, kelas: ch.kelas, durasi_total: lpTotalMin(lp),
+    diubah_pada: nowIso(), dibuat_pada: lp.dibuat_pada || nowIso(), full: true
   }, extra || {});
 }
 
@@ -1602,7 +1693,7 @@ RECON['lp.save'] = {
   },
   fail(err, item) {
     if (S.builder && S.builder.lp && S.builder.lp.lp_id === item.payload.lp_id) { S.builder.state = 'error'; paintAutosave(); }
-    if (err.code === 'DUPLICATE') toast('error', 'Sesi sudah dipakai', err.message + ' Pilih nomor sesi lain.', { action: { label: 'Buka draft', fn: () => go('builder', { id: item.payload.lp_id }) } });
+    if (err.code === 'DUPLICATE') toast('error', 'Chapter sudah punya lesson plan', err.message, { action: { label: 'Buka lesson plan', fn: () => go('builder', { id: (err.data && err.data.lp_id) || item.payload.lp_id }) } });
     else if (err.code === 'LOCKED' || err.code === 'STATE') { toast('warning', 'Dokumen terkunci', err.message); syncNow(false); }
     else toast('error', 'Draft gagal disimpan ke server', err.message + ' Isian tetap aman di perangkat.', { action: { label: 'Buka', fn: () => go('builder', { id: item.payload.lp_id }) } });
   }
@@ -1629,21 +1720,28 @@ RECON['file.delete'] = { ok() {}, fail(err, item) { if (item.prev) S.atts.push(i
 /** Validasi klien (sama dengan server) → error per langkah. */
 function validateBuilder(lp) {
   const e = { 1: [], 2: [], 3: [], 4: [], 5: [] }, ch = chapterById(lp.chapter_id);
-  if (!ch) e[1].push('Pilih chapter.');
-  if (!lp.sub_ids.length) e[1].push('Pilih minimal satu sub-chapter.');
-  if (!(lp.session_no >= 1)) e[1].push('Pilih nomor sesi.');
-  else if (ch && lpsOfChapter(ch.chapter_id).some(l => l.lp_id !== lp.lp_id && l.session_no === lp.session_no)) e[1].push('Sesi ' + lp.session_no + ' sudah memiliki lesson plan.');
-  if (!lp.lo_ids.length) e[2].push('Pilih minimal satu Tujuan Pembelajaran (TP/LO).');
+  if (!ch) { e[1].push('Pilih chapter.'); return e; }
+  if (lpsOfChapter(ch.chapter_id).some(l => l.lp_id !== lp.lp_id)) e[1].push('Chapter ini sudah memiliki lesson plan lain.');
+  { const bd = termBudget(termById(ch.term_id), ch.unit, ch.mata_pelajaran, ch.kelas); if (bd.total > 0) { const used = usedPeriods(ch.term_id, ch.mata_pelajaran, ch.kelas, ''); if (used !== bd.total) e[1].push(`Total period semua chapter ${refLabel('SUBJECT', ch.mata_pelajaran)} ${gradeLabel(ch.kelas)} di term ini harus tepat ${bd.total} period (saat ini ${used}). Lengkapi Analisis Chapter terlebih dahulu.`); } }
+  if (!activeLos(ch).length) e[2].push('Chapter belum memiliki Tujuan Pembelajaran (TP). Lengkapi Analisis Chapter.');
   if (!String(lp.atp_micro_lo).trim()) e[2].push('Isi ATP / Micro LO.');
   if (!lp.icm.length) e[2].push('Pilih minimal satu ICM Value.');
   if (!lp.seq.length) e[2].push('Pilih minimal satu tahapan pengajaran.');
   if (!lp.diff.length) e[3].push('Tentukan minimal satu strategi diferensiasi.');
   if (!String(lp.essential_question).trim()) e[3].push('Isi Essential Question.');
   if (!String(lp.terminology).trim()) e[3].push('Isi Terminology & Trigger Question.');
-  const sc = lp.scenarios;
-  if (SCEN.some(s => !String(sc[s.k].desc).trim() || !(+sc[s.k].menit > 0))) e[4].push('Lengkapi skenario Beginning, Middle, dan End beserta durasinya.');
-  const al = lpAlok(lp, ch), tot = scenTotal(sc);
-  if (al && tot > al.menit) e[4].push('Total durasi ' + tot + ' menit melebihi alokasi ' + alokText(al) + '.');
+  const ses = lp.sessions || [];
+  if (!ses.length) e[4].push('Tambahkan minimal satu pertemuan.');
+  ses.forEach((se, i) => {
+    const n = 'Pertemuan ' + (i + 1) + ': ', al = sesAlok(se, ch.unit), sc = se.scenarios;
+    if (!al) e[4].push(n + 'pilih alokasi period.');
+    if (!(se.lo_ids || []).length) e[4].push(n + 'pilih minimal satu TP yang diajarkan.');
+    if (SCEN.some(s => !String(sc[s.k].desc).trim() || !(+sc[s.k].menit > 0))) e[4].push(n + 'lengkapi Pendahuluan, Inti, dan Penutup beserta durasinya.');
+    if (al && scenTotal(sc) > al.menit) e[4].push(n + 'durasi ' + scenTotal(sc) + ' menit melebihi ' + alokText(al) + '.');
+  });
+  { const miss = uncoveredLos(lp, ch); if (miss.length) e[4].push(`${miss.length} TP belum masuk ke pertemuan mana pun (${miss.slice(0, 6).map(l => l.kode).join(', ')}${miss.length > 6 ? ', …' : ''}). Setiap TP chapter harus diajarkan di minimal satu pertemuan.`); }
+  const per = lpPlannedPeriods(lp, ch), target = +ch.jumlah_period || 0;
+  if (ses.length && target && per !== target) e[4].push(`Total period semua pertemuan (${per}) harus sama dengan period chapter (${target}).`);
   if (!S.atts.filter(a => a.lp_id === lp.lp_id).length) e[5].push('Unggah minimal satu lampiran pendukung (PDF, DOCX, atau PPTX).');
   if (Object.keys(S.uploads).some(k => S.uploads[k].lp_id === lp.lp_id)) e[5].push('Tunggu unggahan lampiran selesai.');
   return e;
@@ -1653,21 +1751,21 @@ function builderHtml() {
   const b = S.builder, lp = b.lp, ch = chapterById(lp.chapter_id) || {}, t = termById(ch.term_id) || activeTerm();
   const errs = b.tried ? validateBuilder(lp) : {};
   const stepState = i => { const v = validateBuilder(lp)[i]; return i === b.step ? 'cur' : (b.tried && v.length ? 'err' : (i < b.step || !v.length ? 'done' : '')); };
-  const total = scenTotal(lp.scenarios);
+  const planned = lpPlannedPeriods(lp, ch), target = +ch.jumlah_period || 0;
   return `
   <div class="builder-top">
     <div class="min-w-0"><div class="eyebrow">${ic('circle-fill', 'fs-xs')} Tahap perencanaan aktif · ${E(unitShort(ch.unit || ''))} ${E(refLabel('SUBJECT', ch.mata_pelajaran || ''))} ${E(gradeLabel(ch.kelas || ''))}</div>
-      <h1 style="font-size:1.5rem;font-weight:800;margin-top:4px">Rancangan Modul Ajar · ${E(ch.kode ? ch.kode : 'Chapter')} Sesi ${E(lp.session_no || '–')}</h1></div>
+      <h1 style="font-size:1.5rem;font-weight:800;margin-top:4px">Rancangan Modul Ajar · ${E(ch.kode ? ch.kode + ' ' + ch.nama_chapter : 'Chapter')}</h1><div class="fs-sm text-2 mt-1">${(lp.sessions || []).length} pertemuan · ${planned} dari ${target} period chapter</div></div>
     <div class="d-flex align-items-center gap-2 flex-wrap"><span id="bldSave" class="autosave"></span>${pill(lp.status)}<span class="chip gray mono" id="bldKode">${E(lp.kode_dok || 'DRAFT · belum tersinkron')}</span></div>
   </div>
   ${lp.status === 'RETURNED' ? `<div class="notice amber mb-3"><span class="ic">${ic('arrow-counterclockwise')}</span><div class="flex-grow-1"><b>Dikembalikan untuk revisi oleh ${E(lp.reviewer_terakhir || 'pimpinan')}</b><div class="mt-1">“${E(lp.catatan_terakhir || '')}”</div><div class="mt-2 d-flex gap-3 flex-wrap"><button class="link-btn" data-act="bld.annots">${ic('pencil-square')} Lihat coretan & anotasi pada dokumen</button><span class="text-2 fs-sm">Pengajuan ulang akan menjadi revisi ke-${(+lp.revisi_ke || 1) + 1}.</span></div></div></div>` : ''}
   <nav class="steps" aria-label="Langkah penyusunan">${STEPS.map((s, i) => { const n = i + 1, st = stepState(n); return `<button class="step ${st}" data-act="bld.step" data-step="${n}" aria-current="${n === b.step ? 'step' : 'false'}"><span class="c">${st === 'done' ? ic('check-lg') : st === 'err' ? ic('exclamation') : n}</span><span class="t">${n}. ${E(s.t)}</span><span class="s">${st === 'done' ? 'Selesai' : st === 'cur' ? 'Sedang diisi' : st === 'err' ? 'Perlu dilengkapi' : 'Menunggu'}</span></button>`; }).join('')}</nav>
   ${b.tried && errs[b.step] && errs[b.step].length ? `<div class="notice rose mb-3"><span class="ic">${ic('exclamation-triangle-fill')}</span><div><b>${errs[b.step].length} isian wajib belum lengkap pada langkah ini:</b><ul>${errs[b.step].map(x => `<li>${E(x)}</li>`).join('')}</ul></div></div>` : ''}
-  <div id="bldStep">${[stepIdentitas, stepTujuan, stepDiferensiasi, stepSkenario, stepLampiran][b.step - 1](lp, ch, t)}</div>
+  <div id="bldStep">${[stepIdentitas, stepTujuan, stepDiferensiasi, stepPertemuan, stepLampiran][b.step - 1](lp, ch, t)}</div>
   <div class="sticky-bar bld-bar">
     <button class="btn btn-outline" data-act="bld.preview" aria-label="Pratinjau PDF" title="Pratinjau PDF">${ic('eye')}<span class="hide-mobile">Pratinjau PDF</span></button>
     ${b.step === 5 ? `<button class="btn btn-outline hide-mobile" data-act="bld.pdf">${ic('download')} Unduh Draf PDF</button>` : ''}
-    <span class="grow"></span><span class="fs-sm text-2 hide-mobile">${ic('stopwatch')} ${total} menit</span>
+    <span class="grow"></span><span class="fs-sm hide-mobile fw-6" id="bldPer" style="color:${planned === target ? 'var(--green)' : 'var(--text-2)'}">${ic('hourglass-split')} ${planned}/${target} period</span>
     <button class="btn btn-ghost" data-act="bld.exit" aria-label="Batal dan kembali" title="Batal & kembali">${ic('x-lg')}<span class="hide-mobile">Batal &amp; Kembali</span></button>
     <button class="btn btn-soft" data-act="bld.save" aria-label="Simpan draft" title="Simpan draft">${ic('floppy')}<span class="hide-mobile">Simpan Draft</span></button>
     ${b.step < 5 ? `<button class="btn btn-primary" data-act="bld.step" data-step="${b.step + 1}"><span class="hide-mobile">Lanjut: ${E(STEPS[b.step].t)}</span><span class="show-mobile">Lanjut</span> ${ic('arrow-right')}</button>` : `<button class="btn btn-primary" data-act="bld.submit">${ic('send')}<span class="hide-mobile">Simpan & Kirim ke Pimpinan</span><span class="show-mobile">Kirim ke Pimpinan</span></button>`}
@@ -1676,32 +1774,34 @@ function builderHtml() {
 function bldRerender() { const y = window.scrollY; const el = $('#bld'); if (!el || !S.builder) return; el.innerHTML = builderHtml(); window.scrollTo(0, y); paintAutosave(); if (!$('#bld .notice.rose') && !$('#bld .field-err')) dismissToast('val'); }
 
 function stepIdentitas(lp, ch, t) {
-  const chs = chaptersInTerm(t.term_id).filter(c => c.status === 'AKTIF' || c.chapter_id === lp.chapter_id);
-  const ses = lpsOfChapter(lp.chapter_id).filter(l => l.lp_id !== lp.lp_id);
-  const usedSub = {}; ses.forEach(l => (l.sub_ids || []).forEach(s => { (usedSub[s] = usedSub[s] || []).push(l.session_no); }));
-  const usedSes = {}; ses.forEach(l => { usedSes[l.session_no] = l.status; });
-  const maxS = Math.max(targetSesi(ch.chapter_id ? ch : { prediksi_minggu: 2 }) + 4, lp.session_no || 0, 8);
+  const rows = chaptersForLp(t.term_id, lp.lp_id);
+  const bud = ch.chapter_id ? termBudget(t, ch.unit, ch.mata_pelajaran, ch.kelas) : null;
+  const losBySub = sid => activeLos(ch).filter(l => l.sub_id === sid);
   return `<section class="bld-card">
-    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">1</span><div><h3>Pemetaan Bab & Sub-Bab</h3><div class="sub">Pilih lingkup materi yang diajarkan pada sesi pertemuan ini.</div></div></div>
-      <div class="d-flex gap-2 align-items-center"><span class="chip sky hide-mobile">${E(refLabel('SUBJECT', ch.mata_pelajaran || ''))} ${E(gradeLabel(ch.kelas || ''))} · ${E(termLabel(t))}</span><button class="btn btn-soft btn-sm" data-go="chapter-form" data-p-id="${E(lp.chapter_id)}">${ic('pencil-square')} Ubah Silabus</button></div></div>
-    <div class="tree" role="group" aria-label="Pilih chapter dan sub-chapter">${chs.map(c => { const on = c.chapter_id === lp.chapter_id; return `<div class="tree-ch">
-      <div class="tree-row ${on ? 'on' : ''}" data-act="bld.chapter" data-id="${E(c.chapter_id)}" role="radio" aria-checked="${on}"><input type="checkbox" class="form-check-input m-0" tabindex="-1" ${on ? 'checked' : ''} aria-hidden="true">${ic('folder2-open', 'text-2')}<b class="flex-grow-1 clamp-1">${E(c.nama_chapter)}</b><span class="fs-xs text-2">${activeSubs(c).length} sub-bab · ${activeLos(c).length} TP</span></div>
-      ${on ? `<div class="tree-subs">${activeSubs(c).map(s => { const sel = lp.sub_ids.indexOf(s.sub_id) >= 0; const used = usedSub[s.sub_id]; return `<div class="tree-sub ${sel ? 'on' : ''}" data-act="bld.sub" data-id="${E(s.sub_id)}" role="checkbox" aria-checked="${sel}" tabindex="0"><input type="checkbox" class="form-check-input m-0" tabindex="-1" ${sel ? 'checked' : ''} aria-hidden="true"><div class="min-w-0"><div class="fw-6" style="color:${sel ? 'var(--primary-strong)' : 'inherit'}">${E(s.kode)} ${E(s.nama_sub)}</div></div><span class="tag">${used ? 'Dipakai sesi ' + used.join(', ') : 'Belum dijadwalkan'}</span></div>`; }).join('')}</div>` : ''}</div>`; }).join('')}</div>
-    <div class="row g-3 mt-1">
-      <div class="col-md-6"><label class="form-label" for="bSes"><span>Session / Pertemuan ke- <span class="req">*</span></span><span class="hint">${Object.keys(usedSes).length} sesi sudah ada</span></label>
-        <select id="bSes" class="form-select" data-b="session_no" data-num="1"><option value="0">Pilih sesi…</option>${Array.from({ length: maxS }, (_, i) => i + 1).map(n => `<option value="${n}" ${lp.session_no === n ? 'selected' : ''} ${usedSes[n] ? 'disabled' : ''}>Session ${n}${usedSes[n] ? ' — sudah ada (' + STATUS_LABEL[usedSes[n]] + ')' : ''}</option>`).join('')}</select></div>
-      <div class="col-md-6"><label class="form-label" for="bTgl"><span>Tanggal Pelaksanaan</span><span class="hint">Opsional · dipakai untuk pengingat</span></label><input id="bTgl" type="date" class="form-control" data-b="tanggal_ajar" value="${E(lp.tanggal_ajar || '')}" min="${E(t.tanggal_mulai || '')}" max="${E(t.tanggal_selesai || '')}"></div>
-    </div></section>`;
+    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">1</span><div><h3>Pilih Chapter</h3><div class="sub">Satu lesson plan disusun untuk satu chapter dan berisi beberapa pertemuan.</div></div></div>
+      ${ch.chapter_id ? `<button class="btn btn-soft btn-sm" data-go="chapter-form" data-p-id="${E(lp.chapter_id)}">${ic('pencil-square')} Ubah Analisis Chapter</button>` : ''}</div>
+    <div class="tree" role="radiogroup" aria-label="Pilih chapter">${rows.map(({ c, other }) => { const on = c.chapter_id === lp.chapter_id; return `<div class="tree-ch">
+      <div class="tree-row ${on ? 'on' : ''} ${other ? 'disabled' : ''}" ${other ? '' : `data-act="bld.chapter" data-id="${E(c.chapter_id)}"`} role="radio" aria-checked="${on}" aria-disabled="${!!other}" tabindex="${other ? -1 : 0}"><input type="radio" class="form-check-input m-0" tabindex="-1" ${on ? 'checked' : ''} ${other ? 'disabled' : ''} aria-hidden="true">${ic('folder2-open', 'text-2')}<b class="flex-grow-1 clamp-1">${E(c.kode)} · ${E(c.nama_chapter)}</b>
+        <span class="fs-xs text-2 text-nowrap">${+c.jumlah_period || 0} period · ${activeSubs(c).length} sub-bab · ${activeLos(c).length} TP</span>${other ? `<button class="btn btn-soft btn-sm ms-2" data-go="${isEditable(other) ? 'builder' : 'lp-view'}" data-p-id="${E(other.lp_id)}">Sudah ada LP ${ic('arrow-right')}</button>` : ''}</div></div>`; }).join('')}</div>
+  </section>
+  ${ch.chapter_id ? `<section class="bld-card">
+    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="icon-tile sm">${ic('journal-bookmark')}</span><div><h3>${E(ch.kode)} · ${E(ch.nama_chapter)}</h3><div class="sub">${E(refLabel('SUBJECT', ch.mata_pelajaran))} · ${E(gradeLabel(ch.kelas))} · ${E(termLabel(t))}</div></div></div>
+      <div class="text-end"><div class="fw-8" style="font-size:1.4rem;color:var(--primary-strong)">${+ch.jumlah_period || 0} period</div><div class="fs-xs text-2">${bud && bud.total ? 'dari anggaran term ' + bud.total + ' period' : 'period chapter'}</div></div></div>
+    <div class="fs-xs fw-7 text-3 mb-2" style="letter-spacing:.08em">SUB-BAB / TOPIK & TP</div>
+    <div class="d-grid gap-2">${activeSubs(ch).map(sb => { const ls = losBySub(sb.sub_id); return `<div class="tree-sub on" style="cursor:default"><span class="chip">${E(sb.kode)}</span><div class="min-w-0 flex-grow-1"><div class="fw-6">${E(sb.nama_sub)}</div><div class="fs-xs text-2">${ls.length ? ls.map(l => E(l.kode)).join(', ') : '<span style="color:var(--amber-ink)">Belum ada TP</span>'}</div></div></div>`; }).join('')}</div>
+    <div class="fs-sm text-2 mt-3">${ic('info-circle')} Pertemuan, topik per pertemuan, dan alokasi 1P/2P disusun di langkah 4. Total period semua pertemuan harus ${+ch.jumlah_period || 0}.</div>
+  </section>` : ''}`;
 }
 
 function stepTujuan(lp, ch) {
-  const los = activeLos(ch);
+  const los = activeLos(ch), subs = activeSubs(ch), noSub = los.filter(l => !subs.some(s => s.sub_id === l.sub_id));
+  const loRow = l => `<div class="lo-row on" style="cursor:default"><span class="k chip">${E(l.kode)}</span><div class="tx flex-grow-1">${sanitizeRich(l.teks_tp)}<div class="fs-xs text-3 mt-1">${E(l.ranah || '')}${l.taksonomi ? ' · ' + E(l.taksonomi) : ''}</div></div></div>`;
   return `<section class="bld-card">
-    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">2</span><div><h3>Tujuan Pembelajaran & Nilai ICM</h3><div class="sub">TP/LO diambil otomatis dari Analisis Chapter ${E(ch.kode || '')}.</div></div></div><span class="chip sky">${ic('arrow-repeat')} Sinkron otomatis ${E(ch.kode || '')}</span></div>
-    <div class="d-flex justify-content-between align-items-center mb-2"><span class="fs-xs fw-7 text-3" style="letter-spacing:.08em">TUJUAN PEMBELAJARAN TERPILIH (${lp.lo_ids.length} DARI ${los.length})</span>${los.length ? `<button class="link-btn fs-sm" data-act="bld.loAll">${lp.lo_ids.length === los.length ? 'Kosongkan' : 'Pilih semua'}</button>` : ''}</div>
-    ${los.length ? los.map(l => { const on = lp.lo_ids.indexOf(l.lo_id) >= 0; return `<div class="lo-row ${on ? 'on' : ''}" data-act="bld.lo" data-id="${E(l.lo_id)}" role="checkbox" aria-checked="${on}" tabindex="0"><input type="checkbox" class="form-check-input mt-1" tabindex="-1" ${on ? 'checked' : ''} aria-hidden="true"><span class="k chip">${E(l.kode)}</span><div class="tx flex-grow-1">${sanitizeRich(l.teks_tp)}<div class="fs-xs text-3 mt-1">${E(l.ranah || '')}${l.taksonomi ? ' · ' + E(l.taksonomi) : ''}</div></div></div>`; }).join('') : `<div class="notice amber">${ic('info-circle')} Chapter ini belum memiliki TP. <button class="link-btn" data-go="chapter-form" data-p-id="${E(ch.chapter_id)}">Tambahkan TP</button></div>`}
-    <label class="form-label mt-4" for="bAtp"><span>ATP / Micro LO <span class="req">*</span></span><span class="hint" data-cnt="atp_micro_lo">${String(lp.atp_micro_lo).length}/4000</span></label>
-    <textarea id="bAtp" class="form-control" rows="3" maxlength="4000" data-b="atp_micro_lo" placeholder="Alur Tujuan Pembelajaran / Micro LO spesifik sesi ini…">${E(lp.atp_micro_lo)}</textarea>
+    <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num">2</span><div><h3>Tujuan Pembelajaran & Nilai ICM</h3><div class="sub">Seluruh TP chapter ${E(ch.kode || '')} otomatis tercakup dalam lesson plan ini, dikelompokkan per sub-bab.</div></div></div><span class="chip sky">${ic('arrow-repeat')} ${los.length} TP dari Analisis Chapter</span></div>
+    ${los.length ? subs.map(sb => { const ls = los.filter(l => l.sub_id === sb.sub_id); return `<div class="mb-3"><div class="fs-sm fw-7 mb-1" style="color:var(--primary-strong)">${E(sb.kode)} · ${E(sb.nama_sub)}</div>${ls.length ? ls.map(loRow).join('') : `<div class="fs-sm text-2 ps-1">Belum ada TP untuk sub-bab ini.</div>`}</div>`; }).join('') + (noSub.length ? `<div class="mb-3"><div class="fs-sm fw-7 mb-1 text-2">Tanpa sub-bab</div>${noSub.map(loRow).join('')}</div>` : '')
+      : `<div class="notice amber">${ic('info-circle')} Chapter ini belum memiliki TP. <button class="link-btn" data-go="chapter-form" data-p-id="${E(ch.chapter_id)}">Tambahkan TP</button></div>`}
+    <label class="form-label mt-3" for="bAtp"><span>ATP / Micro LO <span class="req">*</span></span><span class="hint" data-cnt="atp_micro_lo">${String(lp.atp_micro_lo).length}/4000</span></label>
+    <textarea id="bAtp" class="form-control" rows="3" maxlength="4000" data-b="atp_micro_lo" placeholder="Alur Tujuan Pembelajaran / Micro LO untuk rangkaian pertemuan chapter ini…">${E(lp.atp_micro_lo)}</textarea>
   </section>
   <section class="bld-card">
     <div class="row g-4">
@@ -1718,11 +1818,11 @@ function stepDiferensiasi(lp) {
   const cellHtml = (a, p) => { const c = cell(a, p); return `<div class="mx-c ${c ? 'on' : ''}" data-act="bld.diff" data-a="${E(a.kode)}" data-p="${E(p.kode)}" role="checkbox" aria-checked="${!!c}" tabindex="0" aria-label="${E(a.label)} × ${E(p.label)}"><span class="ck">${c ? ic('check-lg') : ''}</span>${c ? `<input class="note" data-diffnote="${E(a.kode)}|${E(p.kode)}" value="${E(c.note || '')}" placeholder="Strategi (mis. LKPD bertingkat)" maxlength="140" aria-label="Strategi diferensiasi">` : `<span class="lbl">Belum dipilih</span>`}</div>`; };
   return `<section class="bld-card">
     <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="sec-num solid">3</span><div><h3>Matriks Diferensiasi <span class="chip amber ms-1" style="vertical-align:middle">Wajib</span></h3><div class="sub">Pemetaan strategi berdasarkan kesiapan, minat, dan profil belajar murid.</div></div></div>
-      <div class="text-end"><div class="fw-8" style="font-size:1.5rem;color:var(--primary-strong)">${lp.diff.length} / ${A.length * P.length}</div><div class="fs-xs text-2">Kombinasi terpilih</div></div></div>
+      <div class="text-end"><div class="fw-8" style="font-size:1.5rem;color:var(--primary-strong)">${lp.diff.length} / ${diffMode() === 'SATU' ? 1 : A.length}</div><div class="fs-xs text-2">${diffMode() === 'SATU' ? 'Pilihan (maks. 1)' : 'Baris terisi (1 per baris)'}</div></div></div>
     <div class="matrix"><div class="mx-h" style="background:transparent"><span class="fs-xs fw-7 text-3">DIMENSI FOKUS</span></div>${P.map(p => `<div class="mx-h"><b>${E(p.label)}</b><span>${E(p.deskripsi)}</span></div>`).join('')}
       ${A.map(a => `<div class="mx-r"><b>Diferensiasi ${E(a.label)}</b><span>${E(a.deskripsi)}</span></div>${P.map(p => cellHtml(a, p)).join('')}`).join('')}</div>
     <div class="mx-acc">${A.map((a, ai) => { const n = lp.diff.filter(d => d.a === a.kode).length; return `<details class="card-x pure mb-2" style="padding:0" ${ai === 0 ? 'open' : ''}><summary class="d-flex align-items-center gap-3 p-3" style="list-style:none;cursor:pointer"><span class="sec-num">${ai + 1}</span><div class="flex-grow-1"><b>Diferensiasi ${E(a.label)}</b><div class="fs-xs text-2">${E(a.deskripsi)}</div></div>${n ? `<span class="chip sky">${n} terpilih</span>` : ''}${ic('chevron-down', 'text-3')}</summary><div class="px-3 pb-3 d-grid gap-2">${P.map(p => { const c = cell(a, p); return `<div class="tree-sub ${c ? 'on' : ''}" data-act="bld.diff" data-a="${E(a.kode)}" data-p="${E(p.kode)}" role="checkbox" aria-checked="${!!c}" tabindex="0"><input type="checkbox" class="form-check-input m-0" tabindex="-1" ${c ? 'checked' : ''} aria-hidden="true"><div class="flex-grow-1 min-w-0"><b class="d-block" style="color:${c ? 'var(--primary-strong)' : 'inherit'}">${E(p.label)}</b>${c ? `<input class="form-control form-control-sm mt-1" data-diffnote="${E(a.kode)}|${E(p.kode)}" value="${E(c.note || '')}" placeholder="Strategi (mis. LKPD bertingkat)" maxlength="140">` : `<span class="fs-xs text-2">${E(p.deskripsi)}</span>`}</div></div>`; }).join('')}</div></details>`; }).join('')}</div>
-    <div class="fs-sm text-2 mt-3">${ic('info-circle')} Pilih minimal satu kombinasi diferensiasi sesuai asesmen diagnostik awal.</div>
+    <div class="fs-sm text-2 mt-3">${ic('info-circle')} ${diffMode() === 'SATU' ? 'Pilih <b>satu</b> kombinasi diferensiasi yang paling sesuai dengan asesmen diagnostik awal. Memilih kotak lain akan menggantikan pilihan sebelumnya.' : 'Setiap baris (Content, Process, Product) hanya boleh <b>satu</b> pilihan: Readiness, Interest, <i>atau</i> Learning Profile. Memilih kotak lain di baris yang sama akan menggantikan pilihan sebelumnya. Minimal satu baris diisi.'}</div>
   </section>
   <div class="row g-3">
     <div class="col-lg-6"><section class="bld-card h-100"><div class="d-flex gap-3 align-items-center mb-2"><span class="icon-tile sm amber">${ic('question-lg')}</span><div><b>Essential Question <span style="color:var(--rose)">*</span></b><div class="fs-xs text-2">Pertanyaan esensial / pemantik rasa ingin tahu</div></div></div>
@@ -1732,44 +1832,60 @@ function stepDiferensiasi(lp) {
   </div>`;
 }
 
-function durStripHtml(lp, ch) {
-  const sc = lp.scenarios, total = scenTotal(sc), al = lpAlok(lp, ch), alok = al ? al.menit : 0, over = alok && total > alok, under = alok && total < alok;
+function sesStripHtml(se, ch) {
+  const sc = se.scenarios, total = scenTotal(sc), al = sesAlok(se, ch.unit), alok = al ? al.menit : 0, over = alok && total > alok, under = alok && total < alok;
   const w = k => (total ? (+sc[k].menit / total) * 100 : 33.3);
-  const fitBtn = `<button class="btn btn-soft btn-sm" data-act="bld.fit">${ic('magic')} Sesuaikan ke ${alok} menit</button>`;
-  const chip = over ? `<span class="chip amber">${ic('exclamation-triangle')} Lebih ${total - alok} menit dari alokasi ${alok} menit</span>${fitBtn}`
-    : under ? `<span class="chip sky">${ic('hourglass-split')} Sisa ${alok - total} menit dari alokasi ${alok} menit</span>${fitBtn}`
-    : `<span class="chip green">${ic('check-circle')} Sesuai alokasi${al ? ': ' + E(alokText(al)) : ''}</span>`;
-  return `<div class="dur-strip ${over ? 'warn' : ''}"><div class="d-flex justify-content-between align-items-center flex-wrap gap-2"><b>${ic('stopwatch')} Total Durasi ${total} Menit</b><div class="d-flex align-items-center gap-2 flex-wrap">${chip}</div></div>
+  const chip = over ? `<span class="chip amber">${ic('exclamation-triangle')} Lebih ${total - alok} menit</span>` : under ? `<span class="chip sky">${ic('hourglass-split')} Sisa ${alok - total} menit</span>` : `<span class="chip green">${ic('check-circle')} Pas ${alok} menit</span>`;
+  return `<div class="dur-strip ${over ? 'warn' : ''}"><div class="d-flex justify-content-between align-items-center flex-wrap gap-2"><b>${ic('stopwatch')} ${total} dari ${alok} menit</b><div class="d-flex align-items-center gap-2 flex-wrap">${chip}${over || under ? `<button class="btn btn-soft btn-sm" data-act="bld.sesFit" data-i="${E(se.id)}">${ic('magic')} Sesuaikan ke ${alok} menit</button>` : ''}</div></div>
     <div class="dur-bar"><span style="width:${w('beginning')}%;background:var(--sky)"></span><span style="width:${w('middle')}%;background:var(--primary)"></span><span style="width:${w('end')}%;background:var(--amber)"></span></div>
-    <div class="dur-legend"><span><span class="dot sky"></span> Pendahuluan: ${sc.beginning.menit}m (${Math.round(w('beginning'))}%)</span><span><span class="dot"></span> Kegiatan inti: ${sc.middle.menit}m (${Math.round(w('middle'))}%)</span><span><span class="dot amber"></span> Penutup: ${sc.end.menit}m (${Math.round(w('end'))}%)</span></div></div>`;
+    <div class="dur-legend"><span><span class="dot sky"></span> Pendahuluan ${sc.beginning.menit}m</span><span><span class="dot"></span> Inti ${sc.middle.menit}m</span><span><span class="dot amber"></span> Penutup ${sc.end.menit}m</span></div></div>`;
 }
-
-function periodPickHtml(lp, ch) {
-  const opts = periodOpts(ch.unit), al = lpAlok(lp, ch);
-  if (!opts.length) return '';
-  return `<section class="bld-card period-card"><div class="d-flex flex-wrap gap-3 align-items-center justify-content-between">
-    <div class="d-flex gap-3 align-items-center min-w-0"><span class="icon-tile sm">${ic('hourglass-split')}</span><div><b>Alokasi waktu sesi ini <span style="color:var(--rose)">*</span></b><div class="fs-xs text-2">Pilih jumlah period untuk pertemuan ini. Durasi skenario menyesuaikan otomatis.</div></div></div>
-    <div class="period-pick" role="radiogroup" aria-label="Alokasi waktu sesi">${opts.map(o => `<button type="button" role="radio" aria-checked="${al && al.kode === o.kode}" class="${al && al.kode === o.kode ? 'on' : ''}" data-act="bld.alok" data-k="${E(o.kode)}"><b>${E(o.label)}</b><span>${o.menit} menit</span></button>`).join('')}</div>
-  </div></section>`;
+function sesSummaryHtml(lp, ch) {
+  const ses = lp.sessions || [], per = lpPlannedPeriods(lp, ch), target = +ch.jumlah_period || 0, diff = target - per, pp = target ? Math.min(100, Math.round(pct(per, target))) : 0;
+  const opts = periodOpts(ch.unit);
+  return `<div class="d-flex flex-wrap gap-3 justify-content-between align-items-center"><div style="flex:1 1 260px"><b style="font-size:1.05rem">${per} dari ${target} period terencana</b> <span class="text-2 fs-sm">· ${ses.length} pertemuan · ${lpTotalMin(lp)} menit</span>
+      <div class="bar-mini mt-2 ${diff === 0 ? 'green' : diff < 0 ? 'rose' : ''}" style="height:8px"><span style="width:${pp}%"></span></div>
+      <div class="fs-sm mt-1" style="color:${diff === 0 ? 'var(--green)' : diff < 0 ? 'var(--rose)' : 'var(--amber-ink)'}">${diff === 0 ? ic('check-circle') + ' Total period sudah sama dengan period chapter.' : diff > 0 ? ic('hourglass-split') + ' Kurang ' + diff + ' period — tambahkan pertemuan atau ubah 1P menjadi 2P.' : ic('exclamation-triangle') + ' Lebih ' + (-diff) + ' period — hapus pertemuan atau ubah 2P menjadi 1P.'}</div></div>
+    ${(() => { const miss = uncoveredLos(lp, ch), tot = activeLos(ch).length; return `<div class="w-100 fs-sm" style="color:${miss.length ? 'var(--rose)' : 'var(--green)'}">${miss.length ? ic('exclamation-triangle') + ' ' + miss.length + ' dari ' + tot + ' TP belum masuk ke pertemuan mana pun: ' + E(miss.slice(0, 8).map(l => l.kode).join(', ')) + (miss.length > 8 ? ', …' : '') : ic('check-circle') + ' Semua ' + tot + ' TP chapter sudah terpetakan ke pertemuan.'}</div>`; })()}
+    <div class="d-flex gap-2 flex-wrap">${opts.map(o => `<button class="btn btn-outline btn-sm" data-act="bld.sesAdd" data-k="${E(o.kode)}">${ic('plus-lg')} Pertemuan ${E(o.label)}</button>`).join('')}<button class="btn btn-soft btn-sm" data-act="bld.sesAuto" title="Susun ulang pertemuan otomatis dari period chapter">${ic('magic')} Susun otomatis</button></div></div>`;
 }
-
-function stepSkenario(lp, ch) {
-  const durs = refsOf('DURATION');
-  return `<div class="mb-3"><div class="eyebrow">Modul perencanaan sesi · ${E(refLabel('SUBJECT', ch.mata_pelajaran || ''))} ${E(gradeLabel(ch.kelas || ''))} · ${E(ch.nama_chapter || '')}</div><h2 style="font-size:1.35rem;font-weight:800;margin-top:4px">Penyusunan Skenario & Alokasi Pembelajaran</h2><div class="text-2 fs-md">Rancang sintaks alur pembelajaran bertahap (Beginning, Middle, End).</div></div>
-  ${periodPickHtml(lp, ch)}
-  ${SCEN.map(s => { const v = lp.scenarios[s.k]; return `<section class="scen ${s.key}"><div class="scen-head"><span class="scen-tile">${s.key}</span><div class="min-w-0"><b>${E(s.t)}</b><div class="fs-xs text-2">${E(s.s)}</div></div>
-    <select class="form-select" data-b="scenarios.${s.k}.menit" data-num="1" aria-label="Durasi ${E(s.t)}">${(durs.some(d => +d.kode === +v.menit) ? durs : durs.concat([{ kode: String(v.menit), label: v.menit + ' Menit' }])).map(d => `<option value="${E(d.kode)}" ${+d.kode === +v.menit ? 'selected' : ''}>${E(d.label)}</option>`).join('')}</select></div>
-    <label class="fs-xs fw-7 text-3 mb-1 d-block" style="letter-spacing:.06em">URAIAN SINTAKS AKTIVITAS GURU & MURID <span style="color:var(--rose)">*</span></label>
-    <textarea class="form-control" rows="4" maxlength="4000" data-b="scenarios.${s.k}.desc" placeholder="${E(s.ph)}">${E(v.desc)}</textarea></section>`; }).join('')}
-  <div id="durStrip">${durStripHtml(lp, ch)}</div>`;
+function sesCardHtml(se, i, lp, ch) {
+  const b = S.builder, open = b.open === i, al = sesAlok(se, ch.unit), subs = activeSubs(ch), n = (lp.sessions || []).length;
+  const durs = refsOf('DURATION'), topik = subs.filter(x => (se.sub_ids || []).indexOf(x.sub_id) >= 0);
+  const ok = al && topik.length && SCEN.every(s => String(se.scenarios[s.k].desc).trim() && +se.scenarios[s.k].menit > 0) && scenTotal(se.scenarios) <= al.menit;
+  return `<section class="ses-card ${open ? 'open' : ''}" id="ses-${E(se.id)}">
+    <div class="ses-head">
+      <button class="ses-toggle" data-act="bld.sesOpen" data-i="${i}" aria-expanded="${open}"><span class="ses-no ${ok ? 'ok' : ''}">${ok ? ic('check-lg') : i + 1}</span><span class="min-w-0 text-start"><b class="d-block">Pertemuan ${i + 1} <span class="chip ms-1">${E(al ? al.label : '—')}</span>${se.tanggal ? ` <span class="fs-xs text-2 fw-6">${E(fmtTanggal(se.tanggal))}</span>` : ''}</b><span class="fs-xs text-2 clamp-1">${topik.length ? E(topik.map(x => x.kode + ' ' + x.nama_sub).join(' · ')) : 'Topik belum dipilih'}</span></span>${ic(open ? 'chevron-up' : 'chevron-down', 'ms-auto text-3')}</button>
+      <div class="ses-tools"><button class="btn-icon" data-act="bld.sesMove" data-i="${i}" data-d="-1" ${i === 0 ? 'disabled' : ''} aria-label="Naikkan" title="Naikkan">${ic('arrow-up')}</button><button class="btn-icon" data-act="bld.sesMove" data-i="${i}" data-d="1" ${i === n - 1 ? 'disabled' : ''} aria-label="Turunkan" title="Turunkan">${ic('arrow-down')}</button><button class="btn-icon" data-act="bld.sesDup" data-i="${i}" aria-label="Duplikat pertemuan" title="Duplikat">${ic('copy')}</button><button class="btn-icon danger" data-act="bld.sesDel" data-i="${i}" aria-label="Hapus pertemuan" title="Hapus">${ic('trash3')}</button></div>
+    </div>
+    ${open ? `<div class="ses-body">
+      <div class="row g-3 mb-2">
+        <div class="col-lg-7"><div class="fs-xs fw-7 text-3 mb-1" style="letter-spacing:.06em">ALOKASI PERIOD <span style="color:var(--rose)">*</span></div><div class="period-pick" role="radiogroup" aria-label="Alokasi period pertemuan ${i + 1}">${periodOpts(ch.unit).map(o => `<button type="button" role="radio" aria-checked="${al && al.kode === o.kode}" class="${al && al.kode === o.kode ? 'on' : ''}" data-act="bld.sesAlok" data-i="${i}" data-k="${E(o.kode)}"><b>${E(o.label)}</b><span>${o.menit} menit</span></button>`).join('')}</div></div>
+        <div class="col-lg-5"><label class="fs-xs fw-7 text-3 mb-1 d-block" style="letter-spacing:.06em" for="sesTgl${i}">TANGGAL (OPSIONAL)</label><input id="sesTgl${i}" type="date" class="form-control" data-b="sessions.${i}.tanggal" value="${E(se.tanggal || '')}"></div>
+      </div>
+      <div class="fs-xs fw-7 text-3 mb-1" style="letter-spacing:.06em">TP YANG DIAJARKAN DI PERTEMUAN INI <span style="color:var(--rose)">*</span> <span class="fw-6" style="letter-spacing:0;text-transform:none">· sub-bab mengikuti otomatis</span></div>
+      <div class="tp-pick mb-3">${subs.map(sb => { const ls = activeLos(ch).filter(l => l.sub_id === sb.sub_id); if (!ls.length) return ''; const nOn = ls.filter(l => (se.lo_ids || []).indexOf(l.lo_id) >= 0).length;
+        return `<div class="tp-grp"><div class="tp-grp-h"><b>${E(sb.kode)} ${E(sb.nama_sub)}</b><span class="chip ${nOn ? 'sky' : ''}">${nOn}/${ls.length} TP</span><button class="link-btn" data-act="bld.sesLoSub" data-i="${i}" data-id="${E(sb.sub_id)}">${nOn === ls.length ? 'Kosongkan' : 'Pilih semua'}</button></div>
+        ${ls.map(l => { const on = (se.lo_ids || []).indexOf(l.lo_id) >= 0; return `<button type="button" role="checkbox" aria-checked="${on}" class="tp-opt ${on ? 'on' : ''}" data-act="bld.sesLo" data-i="${i}" data-id="${E(l.lo_id)}"><span class="ck">${on ? ic('check-lg') : ''}</span><span class="min-w-0"><b>${E(l.kode)}</b> ${E(stripTags(l.teks_tp).slice(0, 140))}</span></button>`; }).join('')}</div>`; }).join('')}</div>
+      ${SCEN.map(s => { const v = se.scenarios[s.k]; return `<section class="scen ${s.key}"><div class="scen-head"><span class="scen-tile">${s.key}</span><div class="min-w-0"><b>${E(s.t)}</b><div class="fs-xs text-2">${E(s.s)}</div></div>
+        <select class="form-select" data-b="sessions.${i}.scenarios.${s.k}.menit" data-num="1" aria-label="Durasi ${E(s.t)} pertemuan ${i + 1}">${(durs.some(d => +d.kode === +v.menit) ? durs : durs.concat([{ kode: String(v.menit), label: v.menit + ' Menit' }])).map(d => `<option value="${E(d.kode)}" ${+d.kode === +v.menit ? 'selected' : ''}>${E(d.label)}</option>`).join('')}</select></div>
+        <textarea class="form-control" rows="3" maxlength="4000" data-b="sessions.${i}.scenarios.${s.k}.desc" placeholder="${E(s.ph)}" aria-label="Uraian ${E(s.t)} pertemuan ${i + 1}">${E(v.desc)}</textarea></section>`; }).join('')}
+      <div id="sesStrip-${E(se.id)}">${sesStripHtml(se, ch)}</div>
+    </div>` : ''}
+  </section>`;
+}
+function stepPertemuan(lp, ch) {
+  const ses = lp.sessions || [];
+  return `<div class="mb-3"><div class="eyebrow">Rencana pertemuan · ${E(refLabel('SUBJECT', ch.mata_pelajaran || ''))} ${E(gradeLabel(ch.kelas || ''))} · ${E(ch.nama_chapter || '')}</div><h2 style="font-size:1.35rem;font-weight:800;margin-top:4px">Pertemuan & Skenario Pembelajaran</h2><div class="text-2 fs-md">Setiap pertemuan berdurasi 1 atau 2 period dan memiliki Pendahuluan, Inti, dan Penutup. Total period semua pertemuan harus sama dengan period chapter.</div></div>
+  <section class="bld-card" id="sesSum">${sesSummaryHtml(lp, ch)}</section>
+  ${ses.length ? ses.map((se, i) => sesCardHtml(se, i, lp, ch)).join('') : emptyState('calendar-plus', 'Belum ada pertemuan', 'Klik "Susun otomatis" untuk membuat pertemuan dari period chapter, atau tambahkan satu per satu.', '')}`;
 }
 
 function stepLampiran(lp, ch, t) {
   const atts = S.atts.filter(a => a.lp_id === lp.lp_id), ups = Object.keys(S.uploads).map(k => S.uploads[k]).filter(u => u.lp_id === lp.lp_id);
   const leaders = Object.keys(S.people).map(k => S.people[k]).filter(p => p.r === 'LEADER' && String(p.u).split(',').indexOf(ch.unit) >= 0);
   const v = validateBuilder(lp), allErr = [1, 2, 3, 4, 5].reduce((a, i) => a.concat(v[i].map(x => ({ i, x }))), []);
-  const sub = (lp.sub_ids || []).map(x => (activeSubs(ch).find(s => s.sub_id === x) || {})).filter(s => s.nama_sub)[0];
-  const fname = `${safeName(ch.nama_chapter)}_${safeName(sub ? sub.kode + ' ' + sub.nama_sub : '')}_Sesi${lp.session_no || 0}_<<Timestamp>>.pdf`;
+  const fname = `${safeName(lp.kode_dok || 'LP-' + (ch.kode || ''))}_${safeName(ch.nama_chapter)}_<<Timestamp>>.pdf`;
   return `<section class="bld-card">
     <div class="card-head"><div><h3>Lampiran Pembelajaran & Media Ajar</h3><div class="sub">Sertakan LKPD, slide paparan, dan instrumen rubrik penilaian.</div></div><span class="chip">${atts.length} Berkas Terunggah</span></div>
     <div class="dropzone" data-act="bld.pick" id="dropZone" role="button" tabindex="0" aria-label="Unggah lampiran"><div class="ill">${ic('cloud-arrow-up')}</div><b>Seret berkas ke sini atau klik untuk memilih</b><div class="fs-sm text-2">Format PDF, DOCX, PPTX · maksimal 10 MB per dokumen</div></div>
@@ -1779,7 +1895,7 @@ function stepLampiran(lp, ch, t) {
   ${allErr.length ? `<div class="notice rose mb-3"><span class="ic">${ic('exclamation-triangle-fill')}</span><div><b>${allErr.length} data wajib belum lengkap sebelum dapat diajukan ke pimpinan:</b><ul>${allErr.map(e => `<li><button class="link-btn" data-act="bld.step" data-step="${e.i}">${E(e.x)} ${ic('arrow-right')}</button></li>`).join('')}</ul></div></div>` : `<div class="notice green mb-3"><span class="ic">${ic('check-circle-fill')}</span><div><b>Semua isian wajib lengkap.</b> Dokumen siap diajukan ke pimpinan.</div></div>`}
   <section class="confirm-card mb-2"><div class="hd"><span class="icon-tile sm">${ic('clipboard-check')}</span><div><b>Konfirmasi Pengajuan Lesson Plan ke Pimpinan</b><div class="fs-xs text-2">Pastikan parameter dokumen sudah sesuai standar baku sekolah.</div></div></div>
     <div class="p-3"><div class="kv-grid">
-      <div class="kv"><div class="k">Sesi & Topik</div><div class="v">${E(ch.nama_chapter || '—')} · Sesi ${E(lp.session_no || '–')}</div></div>
+      <div class="kv"><div class="k">Chapter & Pertemuan</div><div class="v">${E((ch.kode ? ch.kode + ' · ' : '') + (ch.nama_chapter || '—'))} · ${(lp.sessions || []).length} pertemuan · ${lpPlannedPeriods(lp, ch)} period</div></div>
       <div class="kv"><div class="k">Guru Pengampu</div><div class="v">${E(S.me.nama)} (NIP ${E(S.me.nip || '—')})</div></div>
       <div class="kv"><div class="k">Target Reviewer</div><div class="v">${E(leaders.map(l => l.n).join(', ') || 'Pimpinan unit ' + unitShort(ch.unit))}</div></div>
       <div class="kv"><div class="k">Berkas Terlampir</div><div class="v">${atts.length} berkas</div></div>
@@ -1798,8 +1914,7 @@ document.addEventListener('input', e => {
     o[path[path.length - 1]] = el.dataset.num ? +el.value : el.value;
     const cnt = $(`[data-cnt="${path[path.length - 1]}"]`);
     if (cnt) cnt.textContent = el.value.length + (path[path.length - 1] === 'atp_micro_lo' ? '/4000' : ' karakter');
-    if (path[0] === 'scenarios' && path[2] === 'menit') { const ds = $('#durStrip'); if (ds) ds.innerHTML = durStripHtml(b.lp, chapterById(b.lp.chapter_id) || {}); }
-    if (el.dataset.b === 'session_no') bldRerender();
+    if (path[0] === 'sessions' && path[path.length - 1] === 'menit') { const ch = chapterById(b.lp.chapter_id) || {}, se = b.lp.sessions[+path[1]]; const st = se && $('#sesStrip-' + se.id); if (st) st.innerHTML = sesStripHtml(se, ch); }
     markDirty();
   } else if (el.dataset.diffnote) {
     const [a, p] = el.dataset.diffnote.split('|'), d = b.lp.diff.find(x => x.a === a && x.p === p);
@@ -1815,16 +1930,26 @@ document.addEventListener('keydown', e => {
 const toggleIn = (arr, v) => { const i = arr.indexOf(v); if (i >= 0) arr.splice(i, 1); else arr.push(v); };
 Object.assign(ACT, {
   'bld.step': el => { const b = S.builder, n = +el.dataset.step; if (!b || n < 1 || n > 5) return; builderFlush(); b.step = n; bldRerender(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
-  'bld.chapter': el => { const lp = S.builder.lp; if (lp.chapter_id === el.dataset.id) return; lp.chapter_id = el.dataset.id; lp.sub_ids = []; lp.lo_ids = []; lp.session_no = nextFreeSession(lp.chapter_id, lp.lp_id); const ch = chapterById(lp.chapter_id); if (ch && activeSubs(ch).length === 1) lp.sub_ids = [activeSubs(ch)[0].sub_id]; markDirty(); bldRerender(); },
-  'bld.sub': el => { toggleIn(S.builder.lp.sub_ids, el.dataset.id); markDirty(); bldRerender(); },
-  'bld.lo': el => { toggleIn(S.builder.lp.lo_ids, el.dataset.id); markDirty(); bldRerender(); },
-  'bld.loAll': () => { const lp = S.builder.lp, los = activeLos(chapterById(lp.chapter_id) || {}); lp.lo_ids = lp.lo_ids.length === los.length ? [] : los.map(l => l.lo_id); markDirty(); bldRerender(); },
+  'bld.chapter': el => {
+    const b = S.builder, lp = b.lp; if (lp.chapter_id === el.dataset.id) return;
+    const typed = (lp.sessions || []).some(se => SCEN.some(x => String(se.scenarios[x.k].desc).trim()));
+    lp.chapter_id = el.dataset.id;
+    const ch = chapterById(lp.chapter_id) || {};
+    if (!typed) lp.sessions = genSessions(ch); else lp.sessions.forEach(se => syncSesSubs(se, ch));
+    b.open = 0; markDirty(); bldRerender();
+  },
   'bld.icm': el => { toggleIn(S.builder.lp.icm, el.dataset.k); markDirty(); bldRerender(); },
   'bld.seq': el => { toggleIn(S.builder.lp.seq, el.dataset.k); markDirty(); bldRerender(); },
   'bld.diff': (el, ev) => {
     if (ev && ev.target && ev.target.closest && ev.target.closest('[data-diffnote]')) return;
     const lp = S.builder.lp, a = el.dataset.a, p = el.dataset.p, i = lp.diff.findIndex(d => d.a === a && d.p === p);
-    if (i >= 0) lp.diff.splice(i, 1); else lp.diff.push({ a, p, note: '' });
+    if (i >= 0) lp.diff.splice(i, 1);
+    else {
+      // Aturan: satu pilihan per baris (BARIS) atau satu pilihan di seluruh matriks (SATU) — pilihan lama diganti
+      const keepNote = (lp.diff.find(d => d.a === a) || {}).note || '';
+      lp.diff = diffMode() === 'SATU' ? [] : lp.diff.filter(d => d.a !== a);
+      lp.diff.push({ a, p, note: keepNote });
+    }
     markDirty(); bldRerender();
     if (i < 0) { const n = $(`[data-diffnote="${a}|${p}"]`); n && n.focus(); }
   },
@@ -1853,31 +1978,40 @@ Object.assign(ACT, {
     Outbox.push('file.delete', { att_id: a.att_id }, { key: 'att:' + a.att_id, prev: a });
   },
   'att.preview': el => previewAttachment(el.dataset.id),
-  'bld.alok': el => {
-    const b = S.builder; if (!b) return;
-    const lp = b.lp, ch = chapterById(lp.chapter_id) || {}, before = lpAlok(lp, ch), tot = scenTotal(lp.scenarios);
-    const next = periodOpts(ch.unit).find(o => o.kode === el.dataset.k); if (!next || (before && before.kode === next.kode && lp.alok_kode)) return;
-    lp.alok_kode = next.kode;
-    // Bila durasi sebelumnya tepat memenuhi alokasi lama (atau masih kosong), skalakan otomatis ke alokasi baru.
-    const auto = !before || tot === before.menit || !tot;
-    if (auto && tot !== next.menit) fitScen(lp.scenarios, next.menit);
-    markDirty(); bldRerender();
-    if (auto && tot !== next.menit) toast('info', next.label + ' dipilih', `Durasi skenario disesuaikan: ${lp.scenarios.beginning.menit} + ${lp.scenarios.middle.menit} + ${lp.scenarios.end.menit} = ${next.menit} menit.`, { page: 1, id: 'alok' });
+  'bld.sesOpen': el => { const b = S.builder, i = +el.dataset.i; b.open = b.open === i ? -1 : i; bldRerender(); const c = $$('.ses-card')[i]; if (c && b.open === i) c.scrollIntoView({ behavior: 'smooth', block: 'start' }); },
+  'bld.sesAdd': el => { const b = S.builder, ch = chapterById(b.lp.chapter_id) || {}; const se = newSession(ch, el.dataset.k); b.lp.sessions.push(se); b.open = b.lp.sessions.length - 1; markDirty(); bldRerender(); const c = $$('.ses-card')[b.open]; c && c.scrollIntoView({ behavior: 'smooth', block: 'start' }); },
+  'bld.sesDup': el => { const b = S.builder, i = +el.dataset.i, src = b.lp.sessions[i]; if (!src) return; const cp = clone(src); cp.id = uid(); cp.tanggal = ''; b.lp.sessions.splice(i + 1, 0, cp); b.open = i + 1; markDirty(); bldRerender(); },
+  'bld.sesDel': async el => {
+    const b = S.builder, i = +el.dataset.i, se = b.lp.sessions[i]; if (!se) return;
+    if (SCEN.some(x => String(se.scenarios[x.k].desc).trim()) && !(await confirmDlg({ title: 'Hapus pertemuan ' + (i + 1) + '?', message: 'Skenario yang sudah ditulis pada pertemuan ini akan dihapus.', ok: 'Hapus', tone: 'danger', icon: 'trash3', iconTone: 'rose' }))) return;
+    b.lp.sessions.splice(i, 1); b.open = Math.min(b.open, b.lp.sessions.length - 1); markDirty(); bldRerender();
   },
-  'bld.fit': () => {
-    const b = S.builder; if (!b) return;
-    const lp = b.lp, al = lpAlok(lp, chapterById(lp.chapter_id) || {}); if (!al) return;
-    if (!lp.alok_kode) lp.alok_kode = al.kode;
-    fitScen(lp.scenarios, al.menit); markDirty(); bldRerender();
-    toast('success', 'Durasi disesuaikan', `${lp.scenarios.beginning.menit} + ${lp.scenarios.middle.menit} + ${lp.scenarios.end.menit} = ${al.menit} menit.`, { page: 1, id: 'alok' });
+  'bld.sesMove': el => { const a = S.builder.lp.sessions, i = +el.dataset.i, j = i + (+el.dataset.d); if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; if (S.builder.open === i) S.builder.open = j; else if (S.builder.open === j) S.builder.open = i; markDirty(); bldRerender(); },
+  'bld.sesLo': el => { const se = S.builder.lp.sessions[+el.dataset.i]; if (!se) return; se.lo_ids = se.lo_ids || []; toggleIn(se.lo_ids, el.dataset.id); syncSesSubs(se, chapterById(S.builder.lp.chapter_id) || {}); markDirty(); bldRerender(); },
+  'bld.sesLoSub': el => { const b = S.builder, se = b.lp.sessions[+el.dataset.i], ch = chapterById(b.lp.chapter_id) || {}; if (!se) return; const ids = activeLos(ch).filter(l => l.sub_id === el.dataset.id).map(l => l.lo_id), all = ids.every(x => (se.lo_ids || []).indexOf(x) >= 0); se.lo_ids = (se.lo_ids || []).filter(x => ids.indexOf(x) < 0).concat(all ? [] : ids); syncSesSubs(se, ch); markDirty(); bldRerender(); },
+  'bld.sesAlok': el => {
+    const b = S.builder, ch = chapterById(b.lp.chapter_id) || {}, se = b.lp.sessions[+el.dataset.i]; if (!se) return;
+    const before = sesAlok(se, ch.unit), next = periodOpts(ch.unit).find(o => o.kode === el.dataset.k), tot = scenTotal(se.scenarios);
+    if (!next || (before && before.kode === next.kode && se.alok_kode)) return;
+    se.alok_kode = next.kode;
+    // Bila durasi lama tepat memenuhi alokasi lama (atau kosong), skalakan otomatis ke alokasi baru
+    if ((!before || tot === before.menit || !tot) && tot !== next.menit) fitScen(se.scenarios, next.menit);
+    markDirty(); bldRerender();
+  },
+  'bld.sesFit': el => { const b = S.builder, ch = chapterById(b.lp.chapter_id) || {}, se = b.lp.sessions.find(x => x.id === el.dataset.i); if (!se) return; const al = sesAlok(se, ch.unit); if (!al) return; if (!se.alok_kode) se.alok_kode = al.kode; fitScen(se.scenarios, al.menit); markDirty(); bldRerender(); toast('success', 'Durasi disesuaikan', `${se.scenarios.beginning.menit} + ${se.scenarios.middle.menit} + ${se.scenarios.end.menit} = ${al.menit} menit.`, { page: 1, id: 'alok' }); },
+  'bld.sesAuto': async () => {
+    const b = S.builder, ch = chapterById(b.lp.chapter_id) || {};
+    if ((b.lp.sessions || []).some(se => SCEN.some(x => String(se.scenarios[x.k].desc).trim())) && !(await confirmDlg({ title: 'Susun ulang pertemuan?', message: `Daftar pertemuan akan dibuat ulang dari ${+ch.jumlah_period || 0} period chapter. <b>Skenario yang sudah ditulis akan hilang.</b>`, ok: 'Susun ulang', tone: 'danger', icon: 'magic', iconTone: 'amber' }))) return;
+    b.lp.sessions = genSessions(ch); b.open = 0; markDirty(); bldRerender();
+    toast('success', 'Pertemuan disusun', `${b.lp.sessions.length} pertemuan · ${lpPlannedPeriods(b.lp, ch)} period.`, { page: 1, id: 'alok' });
   },
   'bld.submit': async () => {
     const b = S.builder; if (!b) return;
     b.tried = true;
     const v = validateBuilder(b.lp), bad = [1, 2, 3, 4, 5].filter(i => v[i].length);
     if (bad.length) { b.step = bad.indexOf(b.step) >= 0 ? b.step : bad[0]; bldRerender(); toast('warning', 'Belum bisa diajukan', sum(bad.map(i => v[i].length)) + ' isian wajib belum lengkap.', { page: 1, id: 'val' }); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
-    const lp = b.lp, ch = chapterById(lp.chapter_id), alok = (lpAlok(lp, ch) || {}).menit || 0, tot = scenTotal(lp.scenarios);
-    const okk = await confirmDlg({ title: 'Kirim ke pimpinan?', icon: 'send', message: `<b>${E(ch.nama_chapter)} · Sesi ${lp.session_no}</b> akan berstatus <b>Pending Approval</b> dan tidak dapat disunting sampai diputuskan.${lp.status === 'RETURNED' ? `<br>Ini akan menjadi <b>revisi ke-${(+lp.revisi_ke || 1) + 1}</b>.` : ''}${alok && tot > alok ? `<div class="notice amber mt-2"><span class="ic">${ic('exclamation-triangle')}</span><div>Total durasi ${tot} menit melebihi alokasi ${alok} menit.</div></div>` : ''}`, ok: 'Ya, Kirim ke Pimpinan' });
+    const lp = b.lp, ch = chapterById(lp.chapter_id);
+    const okk = await confirmDlg({ title: 'Kirim ke pimpinan?', icon: 'send', message: `<b>${E(ch.kode)} · ${E(ch.nama_chapter)}</b> (${lp.sessions.length} pertemuan · ${lpPlannedPeriods(lp, ch)} period) akan berstatus <b>Pending Approval</b> dan tidak dapat disunting sampai diputuskan.${lp.status === 'RETURNED' ? `<br>Ini akan menjadi <b>revisi ke-${(+lp.revisi_ke || 1) + 1}</b>.` : ''}`, ok: 'Ya, Kirim ke Pimpinan' });
     if (!okk) return;
     const known = S.lps.find(l => l.lp_id === lp.lp_id);
     const prev = known ? { status: known.status, revisi_ke: known.revisi_ke, submitted_at: known.submitted_at } : { status: 'DRAFT', revisi_ke: 1, submitted_at: '' };
@@ -1936,19 +2070,19 @@ const PAGE_W = 794, PAGE_H = 1123;   // A4 @96 dpi
 
 function docDataClient(lp, ch, x) {
   x = x || {}; ch = ch || { subs: [], los: [] };
-  const subMap = byKey(ch.subs || [], 'sub_id'), loMap = byKey(ch.los || [], 'lo_id');
-  const unitRef = S.refs.find(r => r.kategori === 'UNIT' && r.kode === (ch.unit || lp.unit)) || {};
-  const sc = lp.scenarios || emptyLp().scenarios;
+  const subMap = byKey(ch.subs || [], 'sub_id'), loMap = byKey(ch.los || [], 'lo_id'), unit = ch.unit || lp.unit;
+  const unitRef = S.refs.find(r => r.kategori === 'UNIT' && r.kode === unit) || {};
+  const loIds = (lp.lo_ids && lp.lo_ids.length ? lp.lo_ids : activeLos(ch).map(l => l.lo_id));
   return {
     mode: x.mode || 'view', school: { name: cfg('schoolName', ''), sub: cfg('schoolSub', '') }, kode_dok: lp.kode_dok || 'DRAFT (kode dibuat saat sinkron)', status: lp.status, revisi_ke: lp.revisi_ke || 1, verif_code: lp.verif_code,
-    chapter_nama: ch.nama_chapter || lp.chapter_label, subs: (lp.sub_ids || []).map(s => subMap[s] ? subMap[s].kode + ' ' + subMap[s].nama_sub : '').filter(Boolean),
-    session_no: lp.session_no, tanggal_ajar: lp.tanggal_ajar, unit_label: unitRef.label || lp.unit, kelas: gradeLabel(ch.kelas || lp.kelas), mapel: refLabel('SUBJECT', ch.mata_pelajaran || lp.mata_pelajaran),
-    durasi_total: scenTotal(sc), alokasi: alokText(lpAlok(lp, ch)), teacher: x.teacher || { nama: S.me.nama, nip: S.me.nip },
-    los: (lp.lo_ids || []).map(id => loMap[id] ? { kode: loMap[id].kode, teks: loMap[id].teks_tp } : null).filter(Boolean),
+    chapter_nama: ch.nama_chapter || lp.chapter_label, subs: activeSubs(ch).map(s => s.kode + ' ' + s.nama_sub),
+    unit_label: unitRef.label || unit, kelas: gradeLabel(ch.kelas || lp.kelas), mapel: refLabel('SUBJECT', ch.mata_pelajaran || lp.mata_pelajaran),
+    durasi_total: lpTotalMin(lp), chapter_period: +ch.jumlah_period || 0, teacher: x.teacher || { nama: S.me.nama, nip: S.me.nip },
+    los: loIds.map(id => { const l = loMap[id]; return l ? { kode: l.kode, teks: l.teks_tp, sub: subMap[l.sub_id] ? subMap[l.sub_id].kode : '' } : null; }).filter(Boolean),
     atp: lp.atp_micro_lo, icm: (lp.icm || []).map(k => refLabel('ICM_VALUE', k)), seq: (lp.seq || []).map(k => refLabel('SEQUENCE', k)),
     diff: (lp.diff || []).map(d => ({ a: refLabel('DIFF_ASPECT', d.a), p: refLabel('DIFF_PROFILE', d.p), note: d.note })),
     eq: lp.essential_question, terminology: lp.terminology,
-    scen: SCEN.map(s => ({ key: s.key, label: s.t, menit: sc[s.k].menit, desc: sc[s.k].desc })),
+    sessions: (lp.sessions || []).map((se, i) => { const al = sesAlok(se, unit); return { no: i + 1, alokasi: alokText(al), period: periodCount(al, unit), menit: sesMinutes(se), tanggal: se.tanggal, tps: (se.lo_ids || []).map(x => loMap[x] ? loMap[x].kode : '').filter(Boolean), topik: (se.sub_ids || []).map(s => subMap[s] ? subMap[s].kode + ' ' + subMap[s].nama_sub : '').filter(Boolean), scen: SCEN.map(sc => ({ key: sc.key, label: sc.key === 'A' ? 'Pendahuluan' : sc.key === 'B' ? 'Kegiatan Inti' : 'Penutup', menit: se.scenarios[sc.k].menit, desc: se.scenarios[sc.k].desc })) }; }),
     attachments: x.attachments || S.atts.filter(a => a.lp_id === lp.lp_id).map(a => a.nama_file), approval: x.approval || null
   };
 }
@@ -2067,7 +2201,7 @@ function annLabel(a) { return a.t === 'note' ? a.text : a.t === 'hl' ? 'Bagian d
 
 /** Pratinjau dokumen (B-12) dalam modal — dirender instan di klien, identik dengan PDF server. */
 function openDocPreview(data, anns, approval) {
-  modal({ title: 'Pratinjau dokumen', size: 'xl', html: `<div class="d-flex align-items-center gap-3 p-3" style="border-bottom:1px solid var(--border)"><span class="icon-tile sm">${ic('file-earmark-richtext')}</span><div class="flex-grow-1 min-w-0"><b class="d-block clamp-1">${E(data.chapter_nama)} · Sesi ${E(data.session_no)}</b><span class="fs-xs text-2">${approval ? 'Anotasi ' + E(approval.approver_nama) + ' · ' + E(relTime(approval.waktu)) : 'Pratinjau ' + (data.mode === 'draft' ? 'draf' : 'dokumen') + ' — tampilan sama dengan PDF'}</span></div><button class="btn-icon" data-close aria-label="Tutup">${ic('x-lg')}</button></div>
+  modal({ title: 'Pratinjau dokumen', size: 'xl', html: `<div class="d-flex align-items-center gap-3 p-3" style="border-bottom:1px solid var(--border)"><span class="icon-tile sm">${ic('file-earmark-richtext')}</span><div class="flex-grow-1 min-w-0"><b class="d-block clamp-1">${E(data.chapter_nama)} · ${(data.sessions || []).length} pertemuan</b><span class="fs-xs text-2">${approval ? 'Anotasi ' + E(approval.approver_nama) + ' · ' + E(relTime(approval.waktu)) : 'Pratinjau ' + (data.mode === 'draft' ? 'draf' : 'dokumen') + ' — tampilan sama dengan PDF'}</span></div><button class="btn-icon" data-close aria-label="Tutup">${ic('x-lg')}</button></div>
     ${approval && approval.resume_feedback ? `<div class="notice amber m-3 mb-0"><span class="ic">${ic('chat-square-quote')}</span><div><b>Resume feedback:</b> ${E(approval.resume_feedback)}${(anns || []).filter(a => a.t === 'note').length ? `<ul class="mb-0">${anns.filter(a => a.t === 'note').map(a => `<li><b>#${a.n} · Hal. ${a.page}</b> — ${E(a.text)}</li>`).join('')}</ul>` : ''}</div></div>` : ''}
     <div class="p-3">${Doc.html()}</div>`, onMount: () => { Doc.mount(data, anns || [], { editable: false }); $('#docScroll').style.height = '68vh'; } });
 }
@@ -2201,13 +2335,13 @@ PAGES.lead = {
     </div>
     <section class="card-x flush pure mb-4">
       <div class="d-flex flex-wrap gap-3 justify-content-between align-items-start p-4 pb-3"><div><h3 class="fs-5 fw-8">Antrean Persetujuan Lesson Plan <span class="chip amber ms-1">${q.length} Menunggu</span></h3><div class="fs-sm text-2">Daftar perencanaan guru yang memerlukan keputusan Anda — terlama di atas.</div></div><button class="btn btn-soft btn-sm" data-go="queue">Buka Semua Antrean ${ic('arrow-right')}</button></div>
-      ${q.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Guru & Mata Pelajaran</th><th>Bab & Sesi</th><th>Waktu Menunggu</th><th>Status Berkas</th><th class="text-end">Aksi</th></tr></thead><tbody>${q.slice(0, 6).map(queueRow).join('')}</tbody></table></div>`
+      ${q.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Guru & Mata Pelajaran</th><th>Chapter & Pertemuan</th><th>Waktu Menunggu</th><th>Status Berkas</th><th class="text-end">Aksi</th></tr></thead><tbody>${q.slice(0, 6).map(queueRow).join('')}</tbody></table></div>`
         : emptyState('inbox', 'Antrean kosong', 'Tidak ada lesson plan yang menunggu keputusan Anda saat ini.')}
     </section>
     <section class="card-x">
       <div class="card-head"><div class="d-flex gap-3 align-items-center"><span class="icon-tile sm rose">${ic('person-exclamation')}</span><div><h3>Guru Perlu Perhatian & Bimbingan <span class="chip rose ms-1">${attention.length} Guru Terdeteksi</span></h3><div class="sub">Guru dengan revisi berulang atau sesi tertunda — bahan pendampingan pedagogis.</div></div></div></div>
       ${attention.length ? `<div class="row g-3">${attention.map(a => { const p = person(a.id); return `<div class="col-lg-6"><div class="inset h-100"><div class="d-flex gap-2 align-items-center mb-2"><span class="avatar">${E(initials(p.n))}</span><div class="flex-grow-1 min-w-0"><b class="d-block clamp-1">${E(p.n)}</b><span class="fs-xs text-2">${E(refLabel('SUBJECT', p.m))} · ${E(gradeLabel(p.k))}</span></div>${a.returns >= 2 ? `<span class="chip rose">${ic('arrow-repeat')} ${a.returns}x Revisi</span>` : ''}${a.overdue ? `<span class="chip amber">${ic('calendar-x')} ${a.overdue} Sesi Tertunda</span>` : ''}</div>
-        <div class="card-x pure fs-sm" style="padding:10px 12px">${a.lastRet ? `${ic('chat-square-quote', 'text-2')} <b>${E(a.lastRet.chapter_label)} · Sesi ${E(a.lastRet.session_no)}</b> — catatan revisi: <span style="color:var(--st-returned)">${E(a.lastRet.catatan_terakhir || '')}</span>` : a.pastRet ? `${ic('arrow-repeat', 'text-2')} <b>${E(a.pastRet.chapter_label)} · Sesi ${E(a.pastRet.session_no)}</b> dikembalikan ${a.pastRet.jumlah_return}x sebelum ${E(STATUS_LABEL[a.pastRet.status].toLowerCase())}.${a.overdue ? ' Ada sesi yang tanggal mengajarnya sudah lewat namun belum disetujui.' : ''}` : `${ic('calendar-x', 'text-2')} Ada sesi yang tanggal mengajarnya sudah lewat namun belum disetujui.`}</div>
+        <div class="card-x pure fs-sm" style="padding:10px 12px">${a.lastRet ? `${ic('chat-square-quote', 'text-2')} <b>${E(a.lastRet.chapter_label)}</b> — catatan revisi: <span style="color:var(--st-returned)">${E(a.lastRet.catatan_terakhir || '')}</span>` : a.pastRet ? `${ic('arrow-repeat', 'text-2')} <b>${E(a.pastRet.chapter_label)}</b> dikembalikan ${a.pastRet.jumlah_return}x sebelum ${E(STATUS_LABEL[a.pastRet.status].toLowerCase())}.${a.overdue ? ' Ada sesi yang tanggal mengajarnya sudah lewat namun belum disetujui.' : ''}` : `${ic('calendar-x', 'text-2')} Ada sesi yang tanggal mengajarnya sudah lewat namun belum disetujui.`}</div>
         <div class="d-flex gap-2 mt-2 justify-content-end"><button class="btn btn-soft btn-sm" data-act="lead.history" data-id="${E(a.id)}">Lihat Riwayat Review</button><button class="btn btn-primary btn-sm" data-act="lead.remind" data-id="${E(a.id)}">${ic('chat-dots')} Pesan Mentoring</button></div></div></div>`; }).join('')}</div>`
         : `<div class="text-2 fs-sm">${ic('emoji-smile')} Tidak ada guru dengan revisi berulang atau sesi tertunda.</div>`}
     </section>`;
@@ -2228,7 +2362,7 @@ function queueRow(l) {
   const resub = l.revisi_ke > 1;
   return `<tr class="clickable" data-go="review" data-p-id="${E(l.lp_id)}" onmouseenter="prefetchDetails(['${E(l.lp_id)}'])">
     <td data-label="Guru">${teacherCell(l.user_id)}</td>
-    <td data-label="Bab & Sesi"><div class="t-title clamp-1">${E(l.chapter_label)}</div><div class="t-sub">Sesi ${E(l.session_no)} · ${E((l.sub_label || '').split(';')[0])}</div></td>
+    <td data-label="Chapter"><div class="t-title clamp-1">${E(l.chapter_label)}</div><div class="t-sub">${E(lpMeta(l))}</div></td>
     <td data-label="Waktu Menunggu">${waitPill(l.submitted_at)}</td>
     <td data-label="Status">${resub ? `<span class="pill pill-RETURNED plain">Revisi Ulang · Rev. ${E(l.revisi_ke)}</span>` : pill('PENDING')}</td>
     <td class="text-end cell-actions">${isRole('LEADER', 'SUPERADMIN') ? `<button class="btn btn-primary btn-sm">Tinjau Berkas ${ic('arrow-right')}</button>` : `<button class="btn btn-soft btn-sm" data-go="lp-view" data-p-id="${E(l.lp_id)}">Lihat</button>`}</td></tr>`;
@@ -2242,13 +2376,13 @@ function lineChart(id, labels, series) {
 Object.assign(ACT, {
   'lead.export': () => {
     const t = viewTerm();
-    downloadCsv('Rekap_Unit_' + myUnits().join('-') + '_' + t.kode.replace(/\W+/g, '_') + '.csv', ['Guru', 'Mapel', 'Kelas', 'Chapter', 'Sesi', 'Status', 'Revisi', 'Diajukan', 'Diputuskan', 'Catatan Terakhir'],
-      termLps(t.term_id).map(l => [person(l.user_id).n, refLabel('SUBJECT', l.mata_pelajaran), l.kelas, l.chapter_label, l.session_no, STATUS_LABEL[l.status], l.revisi_ke, l.submitted_at, l.decided_at, l.catatan_terakhir]));
+    downloadCsv('Rekap_Unit_' + myUnits().join('-') + '_' + t.kode.replace(/\W+/g, '_') + '.csv', ['Guru', 'Mapel', 'Kelas', 'Chapter', 'Pertemuan', 'Period', 'Status', 'Revisi', 'Diajukan', 'Diputuskan', 'Catatan Terakhir'],
+      termLps(t.term_id).map(l => [person(l.user_id).n, refLabel('SUBJECT', l.mata_pelajaran), l.kelas, l.chapter_label, l.jumlah_sesi, lpPeriods(l), STATUS_LABEL[l.status], l.revisi_ke, l.submitted_at, l.decided_at, l.catatan_terakhir]));
   },
   'lead.history': el => { S.ui.arc = Object.assign(S.ui.arc || {}, { teacher: el.dataset.id, status: '', page: 1 }); go(isRole('LEADER') ? 'archive' : 'all'); },
   'lead.remind': el => {
     const p = person(el.dataset.id), lps = termLps(viewTerm().term_id).filter(l => l.user_id === el.dataset.id && l.status !== 'APPROVED');
-    const msg = `Assalamu'alaikum ${firstName(p.n)},\n\nTerima kasih atas perencanaan pembelajarannya. Berikut lesson plan yang perlu diperhatikan:\n${lps.slice(0, 6).map(l => `• ${l.chapter_label} · Sesi ${l.session_no} — ${STATUS_LABEL[l.status]}${l.catatan_terakhir ? ' (catatan: ' + l.catatan_terakhir + ')' : ''}`).join('\n')}\n\nMari kita jadwalkan sesi pendampingan singkat pekan ini. Silakan buka LMS ICM untuk menindaklanjuti.\n\nSalam,\n${S.me.nama}`;
+    const msg = `Assalamu'alaikum ${firstName(p.n)},\n\nTerima kasih atas perencanaan pembelajarannya. Berikut lesson plan yang perlu diperhatikan:\n${lps.slice(0, 6).map(l => `• ${l.chapter_label} — ${STATUS_LABEL[l.status]}${l.catatan_terakhir ? ' (catatan: ' + l.catatan_terakhir + ')' : ''}`).join('\n')}\n\nMari kita jadwalkan sesi pendampingan singkat pekan ini. Silakan buka LMS ICM untuk menindaklanjuti.\n\nSalam,\n${S.me.nama}`;
     modal({ title: 'Pesan mentoring', html: `<div class="mdl-head"><div><h3>Pesan mentoring untuk ${E(p.n)}</h3><div class="text-2 fs-sm">Salin dan kirim melalui WhatsApp/email sekolah.</div></div><button class="btn-icon" data-close aria-label="Tutup">${ic('x-lg')}</button></div><textarea class="form-control" rows="11" id="mentorMsg">${E(msg)}</textarea><div class="mdl-foot"><button class="btn btn-ghost" data-close>Tutup</button><button class="btn btn-primary" data-act="copy.field" data-field="mentorMsg">${ic('copy')} Salin Pesan</button></div>` });
   },
   'copy.field': el => { const f = document.getElementById(el.dataset.field); if (f) copyText(f.value); }
@@ -2273,8 +2407,8 @@ PAGES.queue = {
     <section class="card-x flush pure"><div class="filter-bar"><div class="input-icon search">${ic('search')}<input class="form-control" data-f="q.q" value="${E(u.q)}" placeholder="Cari nama guru, chapter, atau kode dokumen…"></div>
       <select class="form-select" data-f="q.mapel"><option value="">Semua Mapel</option>${mapels.map(m => `<option value="${m}" ${u.mapel === m ? 'selected' : ''}>${E(refLabel('SUBJECT', m))}</option>`).join('')}</select>
       ${u.tab === 'PENDING' ? `<select class="form-select" data-f="q.sort"><option value="old" ${u.sort === 'old' ? 'selected' : ''}>Urutkan: Menunggu Paling Lama</option><option value="date" ${u.sort === 'date' ? 'selected' : ''}>Tanggal Mengajar Terdekat</option><option value="new" ${u.sort === 'new' ? 'selected' : ''}>Pengajuan Terbaru</option></select>` : ''}</div>
-      ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Guru & Mata Pelajaran</th><th>Bab & Sesi</th><th>${u.tab === 'PENDING' ? 'Waktu Menunggu' : 'Keputusan'}</th><th>Status</th><th class="text-end">Aksi</th></tr></thead><tbody>
-        ${u.tab === 'PENDING' ? slice.map(queueRow).join('') : slice.map(l => `<tr class="clickable st-${l.status}" data-go="${l.status === 'PENDING' && isRole('LEADER', 'SUPERADMIN') ? 'review' : 'lp-view'}" data-p-id="${E(l.lp_id)}"><td data-label="Guru">${teacherCell(l.user_id)}</td><td data-label="Bab & Sesi"><div class="t-title clamp-1">${E(l.chapter_label)}</div><div class="t-sub">Sesi ${E(l.session_no)} · Rev. ${E(l.revisi_ke)}</div></td><td data-label="Keputusan"><div class="fs-sm">${E(l.decided_at ? relTime(l.decided_at) : '—')}</div><div class="t-sub">${E(l.reviewer_terakhir || '')}</div></td><td data-label="Status">${pill(l.status)}</td><td class="text-end cell-actions"><button class="btn btn-soft btn-sm">${ic('eye')} Lihat</button></td></tr>`).join('')}
+      ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Guru & Mata Pelajaran</th><th>Chapter & Pertemuan</th><th>${u.tab === 'PENDING' ? 'Waktu Menunggu' : 'Keputusan'}</th><th>Status</th><th class="text-end">Aksi</th></tr></thead><tbody>
+        ${u.tab === 'PENDING' ? slice.map(queueRow).join('') : slice.map(l => `<tr class="clickable st-${l.status}" data-go="${l.status === 'PENDING' && isRole('LEADER', 'SUPERADMIN') ? 'review' : 'lp-view'}" data-p-id="${E(l.lp_id)}"><td data-label="Guru">${teacherCell(l.user_id)}</td><td data-label="Chapter"><div class="t-title clamp-1">${E(l.chapter_label)}</div><div class="t-sub">${E(lpMeta(l))} · Rev. ${E(l.revisi_ke)}</div></td><td data-label="Keputusan"><div class="fs-sm">${E(l.decided_at ? relTime(l.decided_at) : '—')}</div><div class="t-sub">${E(l.reviewer_terakhir || '')}</div></td><td data-label="Status">${pill(l.status)}</td><td class="text-end cell-actions"><button class="btn btn-soft btn-sm">${ic('eye')} Lihat</button></td></tr>`).join('')}
       </tbody></table></div><div class="tbl-foot"><span>Menampilkan ${slice.length} dari ${rows.length}</span>${pager(rows.length, page, u.per, 'q.page')}</div>` : emptyState('inbox', 'Tidak ada data', u.tab === 'PENDING' ? 'Semua pengajuan sudah Anda putuskan. Kerja bagus!' : 'Belum ada keputusan pada term ini.')}</section>`;
   }
 };
@@ -2296,8 +2430,8 @@ function archiveHtml(key, title, desc) {
     <select class="form-select" data-f="${key}.mapel"><option value="">Semua Mapel</option>${mapels.map(x => `<option value="${x}" ${u.mapel === x ? 'selected' : ''}>${E(refLabel('SUBJECT', x))}</option>`).join('')}</select>
     <select class="form-select" data-f="${key}.teacher"><option value="">Semua Guru</option>${teachers.map(x => `<option value="${x}" ${u.teacher === x ? 'selected' : ''}>${E(person(x).n || x)}</option>`).join('')}</select>
     <select class="form-select" data-f="${key}.status"><option value="">Semua Status</option>${['PENDING', 'RETURNED', 'APPROVED'].map(x => `<option value="${x}" ${u.status === x ? 'selected' : ''}>${STATUS_LABEL[x]}</option>`).join('')}</select></div>
-    ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Unit</th><th>Guru</th><th>Chapter · Sesi</th><th>Status</th><th class="text-center">Rev.</th><th>Diajukan / Diputuskan</th><th class="text-end">Aksi</th></tr></thead><tbody>
-      ${slice.map(l => `<tr class="clickable st-${l.status}" data-go="${l.status === 'PENDING' && isRole('LEADER', 'SUPERADMIN') ? 'review' : 'lp-view'}" data-p-id="${E(l.lp_id)}"><td data-label="Unit"><span class="chip ${l.unit === 'ECP' ? 'amber' : l.unit === 'MS' ? 'sky' : l.unit === 'PS' ? 'green' : ''}">${E(l.unit)}</span></td><td data-label="Guru">${teacherCell(l.user_id)}</td><td data-label="Chapter" class="col-main"><div class="t-title clamp-1">${E(l.chapter_label)}</div><div class="t-sub text-nowrap">Sesi ${E(l.session_no)} · <span class="mono fs-xs">${E(l.kode_dok)}</span></div></td><td data-label="Status" class="text-nowrap">${pill(l.status)}</td><td data-label="Revisi" class="text-md-center">${E(l.revisi_ke)}</td><td data-label="Tanggal" class="text-nowrap fs-sm"><div>${E(fmtTanggal(l.submitted_at))}</div><div class="t-sub">${l.decided_at && l.status !== 'PENDING' ? ic('check2-circle') + ' ' + E(fmtTanggal(l.decided_at)) : 'Belum diputuskan'}</div></td><td class="text-end cell-actions"><button class="btn btn-soft btn-sm text-nowrap">${ic('eye')} Lihat</button></td></tr>`).join('')}
+    ${slice.length ? `<div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Unit</th><th>Guru</th><th>Chapter</th><th>Status</th><th class="text-center">Rev.</th><th>Diajukan / Diputuskan</th><th class="text-end">Aksi</th></tr></thead><tbody>
+      ${slice.map(l => `<tr class="clickable st-${l.status}" data-go="${l.status === 'PENDING' && isRole('LEADER', 'SUPERADMIN') ? 'review' : 'lp-view'}" data-p-id="${E(l.lp_id)}"><td data-label="Unit"><span class="chip ${l.unit === 'ECP' ? 'amber' : l.unit === 'MS' ? 'sky' : l.unit === 'PS' ? 'green' : ''}">${E(l.unit)}</span></td><td data-label="Guru">${teacherCell(l.user_id)}</td><td data-label="Chapter" class="col-main"><div class="t-title clamp-1">${E(l.chapter_label)}</div><div class="t-sub text-nowrap">${E(lpMeta(l))} · <span class="mono fs-xs">${E(l.kode_dok)}</span></div></td><td data-label="Status" class="text-nowrap">${pill(l.status)}</td><td data-label="Revisi" class="text-md-center">${E(l.revisi_ke)}</td><td data-label="Tanggal" class="text-nowrap fs-sm"><div>${E(fmtTanggal(l.submitted_at))}</div><div class="t-sub">${l.decided_at && l.status !== 'PENDING' ? ic('check2-circle') + ' ' + E(fmtTanggal(l.decided_at)) : 'Belum diputuskan'}</div></td><td class="text-end cell-actions"><button class="btn btn-soft btn-sm text-nowrap">${ic('eye')} Lihat</button></td></tr>`).join('')}
     </tbody></table></div><div class="tbl-foot"><span>Menampilkan ${slice.length} dari ${rows.length} lesson plan</span>${pager(rows.length, page, u.per, 'arc.page')}</div>` : emptyState('archive', 'Tidak ada lesson plan', 'Ubah filter untuk melihat data lain.')}</section>`;
 }
 function archiveRows(key) { const u = S.ui[key] || {}, t = viewTerm(); return termLps(t.term_id).filter(l => (!u.unit || l.unit === u.unit) && (!u.mapel || l.mata_pelajaran === u.mapel) && (!u.status || l.status === u.status) && (!u.teacher || l.user_id === u.teacher)); }
@@ -2305,8 +2439,8 @@ PAGES.archive = { title: 'Arsip Lesson Plan', roles: ['LEADER'], render: () => a
 PAGES.all = { title: 'Semua Lesson Plan', roles: ['QA', 'SUPERADMIN'], render: () => archiveHtml('all', 'Semua Lesson Plan', 'Data lintas unit ECP, PS, MS, dan HS untuk audit mutu dan akreditasi.') };
 Object.assign(ACT, {
   'arc.page': el => { const k = S.route.name === 'archive' ? 'arc' : 'all'; S.ui[k].page = +el.dataset.page; renderRoute(false); },
-  'arc.csv': el => { const rows = archiveRows(el.dataset.key); downloadCsv('Rekap_LessonPlan_' + viewTerm().kode.replace(/\W+/g, '_') + '.csv', ['Unit', 'Guru', 'Mapel', 'Kelas', 'Chapter', 'Sesi', 'Kode Dokumen', 'Status', 'Revisi', 'Jumlah Return', 'Diajukan', 'Diputuskan', 'Reviewer', 'Catatan Terakhir'], rows.map(l => [l.unit, person(l.user_id).n, refLabel('SUBJECT', l.mata_pelajaran), l.kelas, l.chapter_label, l.session_no, l.kode_dok, STATUS_LABEL[l.status], l.revisi_ke, l.jumlah_return, l.submitted_at, l.decided_at, l.reviewer_terakhir, l.catatan_terakhir])); },
-  'arc.pdf': el => { const rows = archiveRows(el.dataset.key); reportPdf(el, 'Rekap Lesson Plan ' + viewTerm().kode, rows.length + ' dokumen', ['Unit', 'Guru', 'Mapel', 'Chapter · Sesi', 'Status', 'Rev', 'Diajukan', 'Diputuskan'], rows.map(l => [l.unit, person(l.user_id).n, refLabel('SUBJECT', l.mata_pelajaran), l.chapter_label + ' · S' + l.session_no, STATUS_LABEL[l.status], l.revisi_ke, fmtTanggal(l.submitted_at), l.status !== 'PENDING' ? fmtTanggal(l.decided_at) : '—'])); }
+  'arc.csv': el => { const rows = archiveRows(el.dataset.key); downloadCsv('Rekap_LessonPlan_' + viewTerm().kode.replace(/\W+/g, '_') + '.csv', ['Unit', 'Guru', 'Mapel', 'Kelas', 'Chapter', 'Pertemuan', 'Period', 'Kode Dokumen', 'Status', 'Revisi', 'Jumlah Return', 'Diajukan', 'Diputuskan', 'Reviewer', 'Catatan Terakhir'], rows.map(l => [l.unit, person(l.user_id).n, refLabel('SUBJECT', l.mata_pelajaran), l.kelas, l.chapter_label, l.jumlah_sesi, lpPeriods(l), l.kode_dok, STATUS_LABEL[l.status], l.revisi_ke, l.jumlah_return, l.submitted_at, l.decided_at, l.reviewer_terakhir, l.catatan_terakhir])); },
+  'arc.pdf': el => { const rows = archiveRows(el.dataset.key); reportPdf(el, 'Rekap Lesson Plan ' + viewTerm().kode, rows.length + ' dokumen', ['Unit', 'Guru', 'Mapel', 'Chapter', 'Status', 'Rev', 'Diajukan', 'Diputuskan'], rows.map(l => [l.unit, person(l.user_id).n, refLabel('SUBJECT', l.mata_pelajaran), l.chapter_label + ' · ' + (l.jumlah_sesi || 0) + ' pert.', STATUS_LABEL[l.status], l.revisi_ke, fmtTanggal(l.submitted_at), l.status !== 'PENDING' ? fmtTanggal(l.decided_at) : '—'])); }
 });
 function reportPdf(btn, title, subtitle, cols, rows) {
   setBtnBusy(btn, true, 'Membuat PDF…');
@@ -2340,7 +2474,7 @@ PAGES.review = {
     <div class="review-head">
       <button class="link-btn" data-act="rv.back">${ic('arrow-left')} Antrean Persetujuan</button>
       <span class="avatar lg">${E(initials(t.nama))}</span><div class="min-w-0"><b class="d-block">${E(t.nama)}</b><span class="fs-xs text-2">NIP ${E(t.nip || '—')} · ${E(t.jabatan || 'Guru')}</span></div>
-      <span class="chip gray">${E(refLabel('SUBJECT', lp.mata_pelajaran))}</span><span class="chip gray">${E(gradeLabel(lp.kelas))}</span><span class="chip sky">${E(ch.kode || '')} Sesi ${E(lp.session_no)}</span><span class="chip">Rev. ${E(lp.revisi_ke)}</span>
+      <span class="chip gray">${E(refLabel('SUBJECT', lp.mata_pelajaran))}</span><span class="chip gray">${E(gradeLabel(lp.kelas))}</span><span class="chip sky">${E(ch.kode || '')} · ${E(lpMeta(lp))}</span><span class="chip">Rev. ${E(lp.revisi_ke)}</span>
       <div class="ms-auto d-flex align-items-center gap-2">${pill('PENDING')}
       ${next ? `<button class="btn btn-soft btn-sm text-nowrap" data-go="review" data-p-id="${E(next.lp_id)}" title="Buka berkas berikutnya di antrean">Berikutnya ${ic('arrow-right')}</button>` : ''}</div>
     </div>
@@ -2400,9 +2534,8 @@ function decisionModal(kind) {
   const d = S.detail[S.review.lp_id], lp = d.lp, t = d.teacher || {}, ch = d.chapter || {};
   const ret = kind === 'RETURNED', fb = (S.review.fb || '').trim();
   if (ret && fb.length < 20) { toast('warning', 'Resume feedback wajib', 'Tuliskan catatan revisi minimal 20 karakter.', { page: 1 }); $('#rvFb').focus(); return; }
-  const sub = (lp.sub_ids || []).map(x => (ch.subs || []).find(s => s.sub_id === x)).filter(Boolean)[0];
-  const stamp = new Date(), fname = `APPROVED_${safeName(ch.nama_chapter)}_${safeName(sub ? sub.kode + ' ' + sub.nama_sub : '')}_Sesi${lp.session_no}_${stamp.getFullYear()}${String(stamp.getMonth() + 1).padStart(2, '0')}${String(stamp.getDate()).padStart(2, '0')}-…pdf`;
-  const summary = `<div class="inset d-flex gap-3 align-items-center mb-3"><span class="icon-tile sm ${ret ? '' : 'sky'}">${ic(ret ? 'journal-text' : 'clipboard-check')}</span><div class="min-w-0"><b>${E(t.nama)}</b> <span class="text-2 fs-sm">· ${E(refLabel('SUBJECT', lp.mata_pelajaran))} ${E(gradeLabel(lp.kelas))}</span><div class="fs-sm">${E(ch.kode || '')} Sesi ${E(lp.session_no)} <span class="chip ms-1">${ret ? 'Rev. ' + E(lp.revisi_ke) : 'Final Rev'}</span></div></div></div>`;
+  const stamp = new Date(), fname = `APPROVED_${safeName(lp.kode_dok)}_${safeName(ch.nama_chapter)}_${stamp.getFullYear()}${String(stamp.getMonth() + 1).padStart(2, '0')}${String(stamp.getDate()).padStart(2, '0')}-…pdf`;
+  const summary = `<div class="inset d-flex gap-3 align-items-center mb-3"><span class="icon-tile sm ${ret ? '' : 'sky'}">${ic(ret ? 'journal-text' : 'clipboard-check')}</span><div class="min-w-0"><b>${E(t.nama)}</b> <span class="text-2 fs-sm">· ${E(refLabel('SUBJECT', lp.mata_pelajaran))} ${E(gradeLabel(lp.kelas))}</span><div class="fs-sm">${E(ch.kode || '')} · ${E(lpMeta(lp))} <span class="chip ms-1">${ret ? 'Rev. ' + E(lp.revisi_ke) : 'Final Rev'}</span></div></div></div>`;
   const html = ret
     ? `<div class="mdl-head"><span class="icon-tile amber" style="width:52px;height:52px;flex-basis:52px;font-size:1.4rem">${ic('arrow-counterclockwise')}</span><span class="chip">${ic('circle-fill', 'fs-xs')} Catatan Koreksi</span></div><h3 style="font-size:1.4rem;font-weight:800">Kembalikan lesson plan ini?</h3><p class="text-2">Berkas akan dikembalikan ke status revisi guru beserta catatan dan ${S.review.anns.length} anotasi peninjauan Anda.</p>${summary}
       <label class="form-label" for="dmFb"><span>Catatan Perbaikan Pimpinan <span class="req">*</span></span><span class="hint" id="dmCnt">${fb.length}/1500</span></label><textarea class="form-control" id="dmFb" rows="5" maxlength="1500">${E(fb)}</textarea>
@@ -2438,7 +2571,7 @@ function commitDecision(kind, feedback, notify) {
   Outbox.push(kind === 'RETURNED' ? 'approval.return' : 'approval.approve', { lp_id: id, feedback, annotations: anns, notify }, { key: 'dec:' + id, prev, label: kind === 'RETURNED' ? 'Kembalikan' : 'Setujui' });
   persist();
   const next = pendingQueue(lp.term_id).filter(x => x.lp_id !== id)[0];
-  toast('success', kind === 'RETURNED' ? 'Dikembalikan ke guru' : 'Disetujui & disahkan', `${person(lp.user_id).n || ''} · ${lp.chapter_label} Sesi ${lp.session_no}${next ? ' — membuka berkas berikutnya.' : '.'}`);
+  toast('success', kind === 'RETURNED' ? 'Dikembalikan ke guru' : 'Disetujui & disahkan', `${person(lp.user_id).n || ''} · ${lp.chapter_label}${next ? ' — membuka berkas berikutnya.' : '.'}`);
   S.review = null;
   if (next) go('review', { id: next.lp_id }, { replace: true }); else go(isRole('LEADER') ? 'lead' : 'queue', {}, { replace: true });
 }
@@ -2539,7 +2672,7 @@ Object.assign(ACT, {
 // BAGIAN 25 · MASTER DATA (Term, Unit, Mapel, Kelas, ICM, Sequence, Diferensiasi, Durasi)
 // ════════════════════════════════════════════════════════════
 const MASTER_TABS = [
-  { k: 'TERM', l: 'Tahun & Term', i: 'calendar3' }, { k: 'UNIT', l: 'Unit & Jenjang', i: 'bank', nilai: 'Alokasi cadangan (menit)' }, { k: 'SUBJECT', l: 'Mata Pelajaran', i: 'book' },
+  { k: 'TERM', l: 'Tahun & Term', i: 'calendar3' }, { k: 'SUBJ_PERIOD', l: 'Period per Mapel', i: 'calendar-week' }, { k: 'UNIT', l: 'Unit & Jenjang', i: 'bank', nilai: 'Alokasi cadangan (menit)' }, { k: 'SUBJECT', l: 'Mata Pelajaran', i: 'book' },
   { k: 'GRADE', l: 'Tingkat Kelas', i: 'mortarboard', desk: 'Kode unit (ECP/PS/MS/HS)' }, { k: 'ICM_VALUE', l: 'ICM Value', i: 'heart' }, { k: 'SEQUENCE', l: 'Sequence of Teaching', i: 'list-ol' },
   { k: 'DIFF_ASPECT', l: 'Aspek Diferensiasi', i: 'grid-3x3' }, { k: 'DIFF_PROFILE', l: 'Profil Diferensiasi', i: 'person-badge' }, { k: 'PERIOD', l: 'Alokasi Sesi (Period)', i: 'hourglass-split', nilai: 'Menit per sesi', desk: 'Berlaku untuk unit (kosongkan = semua; mis. HS,MS)' }, { k: 'DURATION', l: 'Pilihan Durasi', i: 'stopwatch', nilai: 'Menit' }
 ];
@@ -2549,17 +2682,18 @@ PAGES.master = {
   render() {
     const tab = S.ui.mTab || 'TERM', cur = MASTER_TABS.find(x => x.k === tab), at = activeTerm();
     const nextDeadline = S.terms.filter(t => t.batas_rpp && t.batas_rpp >= todayYmd()).sort((a, b) => a.batas_rpp < b.batas_rpp ? -1 : 1)[0];
-    const body = tab === 'TERM' ? `
+    const body = tab === 'SUBJ_PERIOD' ? subjPeriodHtml() : tab === 'TERM' ? `
       <div class="stat-grid cols-3" style="grid-template-columns:repeat(3,minmax(0,1fr))">
         ${statCard({ label: 'Total Term Terdaftar', icon: 'calendar-range', value: S.terms.length, unit: 'Siklus', cap: uniq(S.terms.map(t => t.tahun_ajaran)).length + ' tahun akademik' })}
         ${statCard({ label: 'Tenggat Batas RPP Terdekat', icon: 'alarm', tone: 'sky', value: nextDeadline ? Math.max(0, Math.round((ts(nextDeadline.batas_rpp + 'T00:00:00') - ts(todayYmd() + 'T00:00:00')) / 864e5)) : '—', unit: nextDeadline ? 'Hari lagi' : '', vtone: 'sky', cap: nextDeadline ? E(fmtTanggal(nextDeadline.batas_rpp)) + ' · ' + E(nextDeadline.kode) : 'Belum ada tenggat' })}
         ${statCard({ label: 'Status Penguncian', icon: 'lock', tone: 'amber', value: 'Otomatis', vtone: 'amber', cap: S.terms.filter(t => t.status === 'CLOSED').length + ' term tertutup & terkunci' })}
       </div>
       <section class="card-x flush pure"><div class="d-flex flex-wrap gap-2 justify-content-between align-items-start p-4 pb-3"><div><h3 class="fs-5 fw-8">Pengaturan Tahun & Term Akademik <span class="chip ms-1">${S.terms.filter(t => t.status !== 'CLOSED').length} Aktif/Tersimpan</span></h3><div class="fs-sm text-2">Kelola siklus kalender pembelajaran dan jadwal penguncian dokumen.</div></div><button class="btn btn-primary btn-sm" data-act="m.term" data-id="">${ic('plus-circle')} Tambah Term Baru</button></div>
-        <div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Term & Tahun Akademik</th><th>Rentang Tanggal</th><th>Batas RPP</th><th>Status</th><th class="text-end">Aksi</th></tr></thead><tbody>
+        <div class="tbl-wrap"><table class="tbl rtable"><thead><tr><th>Term & Tahun Akademik</th><th>Rentang Tanggal</th><th>Minggu Efektif</th><th>Batas RPP</th><th>Status</th><th class="text-end">Aksi</th></tr></thead><tbody>
           ${S.terms.map(t => `<tr><td data-label="Term" class="text-nowrap"><div class="d-flex align-items-center gap-2"><span class="dot ${t.status === 'ACTIVE' ? 'green' : 'gray'}"></span><div><div class="t-title" style="color:${t.status === 'ACTIVE' ? 'var(--primary-strong)' : t.status === 'CLOSED' ? 'var(--text-3)' : 'inherit'}">Term ${E(t.term)}</div><div class="t-sub">${E(t.tahun_ajaran)} · ${E(t.semester)} · ${E(t.unit_scope === 'ALL' ? 'Semua Unit' : String(t.unit_scope).split(',').join(', '))}</div></div></div></td>
 
             <td data-label="Rentang" class="fs-sm text-nowrap">${E(fmtTanggal(t.tanggal_mulai))} –<div class="t-sub">${E(fmtTanggal(t.tanggal_selesai))}</div></td>
+            <td data-label="Minggu Efektif" class="text-nowrap"><b>${+t.minggu_efektif || 0}</b> minggu<div class="t-sub">${t.minggu_manual ? 'diatur QA' : 'otomatis dari tanggal'}</div></td>
             <td data-label="Batas RPP" class="fs-sm text-nowrap" style="color:${t.batas_rpp >= todayYmd() && t.status === 'ACTIVE' ? 'var(--amber-ink)' : 'inherit'}">${t.batas_rpp >= todayYmd() && t.status === 'ACTIVE' ? ic('alarm') + ' ' : ''}${E(fmtTanggal(t.batas_rpp))}</td>
             <td data-label="Status">${termPill(t.status)}</td>
             <td class="text-end cell-actions text-nowrap"><div class="d-inline-flex gap-1 align-items-center">${t.status !== 'CLOSED' ? `<button class="btn-icon" data-act="m.term" data-id="${E(t.term_id)}" aria-label="Edit term">${ic('pencil-square')}</button>` : ''}${t.status === 'ACTIVE' ? `<button class="btn btn-amber btn-sm" data-act="m.termStatus" data-id="${E(t.term_id)}" data-s="CLOSED" title="Tutup & kunci term ini">${ic('lock')} Tutup</button>` : t.status === 'DRAFT' ? `<button class="btn btn-soft btn-sm" data-act="m.termStatus" data-id="${E(t.term_id)}" data-s="ACTIVE">${ic('play-circle')} Aktivasi</button>` : `<button class="btn btn-ghost btn-sm" data-act="m.termStatus" data-id="${E(t.term_id)}" data-s="ACTIVE" title="Buka kembali (aktifkan)">${ic('unlock')} Buka</button>`}</div></td></tr>`).join('')}</tbody></table></div>
@@ -2578,25 +2712,49 @@ PAGES.master = {
       <div class="col-lg-9">${body}</div></div>`;
   }
 };
+/** Tabel period per minggu: baris = mata pelajaran, kolom = tingkat kelas unit terpilih. */
+function subjPeriodHtml() {
+  const units = UNIT_ORDER.filter(u => S.refs.some(r => r.kategori === 'UNIT' && r.kode === u && r.aktif));
+  const unit = S.ui.spUnit && units.indexOf(S.ui.spUnit) >= 0 ? S.ui.spUnit : (units.indexOf('HS') >= 0 ? 'HS' : units[0]);
+  S.ui.spUnit = unit;
+  const grades = refsOf('GRADE').filter(g => !g.deskripsi || g.deskripsi === unit), subj = refsOf('SUBJECT'), t = activeTerm();
+  const w = t ? +t.minggu_efektif || 0 : 0;
+  const filled = S.refs.filter(r => r.kategori === 'SUBJ_PERIOD' && r.aktif && String(r.kode).indexOf(unit + '|') === 0).length;
+  return `<section class="card-x flush pure"><div class="d-flex flex-wrap gap-2 justify-content-between align-items-start p-4 pb-3"><div><h3 class="fs-5 fw-8">Period per Minggu · Mapel × Kelas <span class="chip ms-1">${filled} terisi</span></h3>
+      <div class="fs-sm text-2">Isi jumlah period per minggu setiap mata pelajaran di setiap tingkat kelas. Anggaran period guru dalam satu term = <b>minggu efektif term × period per minggu</b>${t ? ` — contoh ${E(termLabel(t))}: ${w} minggu × 5 period = ${w * 5} period` : ''}. Kosongkan (0) bila mapel tidak diajarkan di kelas itu.</div></div>
+      <div class="seg" role="tablist" aria-label="Pilih unit">${units.map(u => `<button class="${u === unit ? 'on' : ''}" data-act="m.spUnit" data-k="${u}" role="tab" aria-selected="${u === unit}">${E(unitShort(u))}</button>`).join('')}</div></div>
+    ${grades.length ? `<div class="tbl-wrap"><table class="tbl sp-grid"><thead><tr><th>Mata Pelajaran</th>${grades.map(g => `<th class="text-center">${E(g.label)}</th>`).join('')}</tr></thead><tbody>
+      ${subj.map(m => `<tr><td class="fw-6">${E(m.label)}</td>${grades.map(g => { const v = subjPeriod(unit, m.kode, g.kode); return `<td class="text-center"><input type="number" class="form-control sp-in ${v ? 'has' : ''}" min="0" max="40" inputmode="numeric" data-sp="${E(m.kode)}|${E(g.kode)}" value="${v || ''}" placeholder="0" aria-label="${E(m.label)} ${E(g.label)} period per minggu"></td>`; }).join('')}</tr>`).join('')}
+    </tbody></table></div>` : `<div class="p-4">${emptyState('mortarboard', 'Belum ada tingkat kelas untuk unit ini', 'Tambahkan di tab Tingkat Kelas dengan kode unit ' + E(unit) + '.')}</div>`}
+    <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center p-3" style="border-top:1px solid var(--border)"><span class="fs-sm text-2">${ic('info-circle')} Perubahan berlaku untuk anggaran period di Analisis Chapter semua guru unit ${E(unitShort(unit))}.</span><button class="btn btn-primary" data-act="m.spSave">${ic('check2')} Simpan Period ${E(unitShort(unit))}</button></div></section>`;
+}
 function termDrawer(id) {
   const t = id ? termById(id) : { tahun_ajaran: (activeTerm() || {}).tahun_ajaran || '', term: 1, tanggal_mulai: '', tanggal_selesai: '', batas_rpp: '', unit_scope: 'ALL' };
   drawer({ eyebrow: 'Master Data', title: id ? 'Edit Term' : 'Tambah Term Baru', body: `<form id="termForm" class="d-grid gap-3">
     <div><label class="form-label"><span>Tahun Ajaran <span class="req">*</span></span><span class="hint">format 2026/2027</span></label><input class="form-control" name="tahun_ajaran" value="${E(t.tahun_ajaran)}" placeholder="2026/2027" pattern="\\d{4}/\\d{4}" required></div>
     <div><label class="form-label"><span>Term <span class="req">*</span></span></label><select class="form-select" name="term">${[1, 2, 3, 4].map(n => `<option ${+t.term === n ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
     <div class="row g-2"><div class="col-6"><label class="form-label"><span>Tanggal Mulai <span class="req">*</span></span></label><input type="date" class="form-control" name="tanggal_mulai" value="${E(t.tanggal_mulai)}" required></div><div class="col-6"><label class="form-label"><span>Tanggal Selesai <span class="req">*</span></span></label><input type="date" class="form-control" name="tanggal_selesai" value="${E(t.tanggal_selesai)}" required></div></div>
+    <div><label class="form-label" for="tMinggu"><span>Minggu Efektif <span class="req">*</span></span><span class="hint" id="tMingguHint">otomatis dari tanggal: ${autoWeeks(t.tanggal_mulai, t.tanggal_selesai) || '—'} minggu</span></label>
+      <div class="d-flex gap-2"><input id="tMinggu" type="number" min="1" max="30" class="form-control" name="minggu_efektif" value="${E(t.minggu_manual ? t.minggu_efektif : (autoWeeks(t.tanggal_mulai, t.tanggal_selesai) || ''))}"><button type="button" class="btn btn-soft text-nowrap" id="tMingguAuto">${ic('calculator')} Hitung dari tanggal</button></div>
+      <div class="fs-xs text-2 mt-1">Kurangi bila ada libur, ujian, atau kegiatan sekolah. Dipakai untuk menghitung anggaran period: minggu efektif × period per minggu tiap mapel.</div></div>
     <div><label class="form-label"><span>Batas Akhir Analisis/RPP</span></label><input type="date" class="form-control" name="batas_rpp" value="${E(t.batas_rpp)}"></div>
     <div><label class="form-label"><span>Cakupan Unit</span></label><div class="chipcards">${['ALL'].concat(UNIT_ORDER).map(u => `<label class="chipcard ${String(t.unit_scope).split(',').indexOf(u) >= 0 ? 'on' : ''}" style="cursor:pointer"><input type="checkbox" name="unit_scope" value="${u}" class="d-none" ${String(t.unit_scope).split(',').indexOf(u) >= 0 ? 'checked' : ''}>${u === 'ALL' ? 'Semua Unit' : u}</label>`).join('')}</div></div>
     <div id="termErr" class="field-err" hidden></div></form>`,
     foot: `<button class="btn btn-ghost" data-close>Batal</button><button class="btn btn-primary" id="termSave">${ic('check2')} Simpan</button>`,
     onMount: (el, d) => {
       el.addEventListener('change', e => { if (e.target.name === 'unit_scope') e.target.closest('.chipcard').classList.toggle('on', e.target.checked); });
+      const autoW = () => { const f = $('#termForm', el); return autoWeeks(f.tanggal_mulai.value, f.tanggal_selesai.value); };
+      el.addEventListener('input', e => { if (e.target.name === 'tanggal_mulai' || e.target.name === 'tanggal_selesai') { const h = $('#tMingguHint', el); if (h) h.textContent = 'otomatis dari tanggal: ' + (autoW() || '—') + ' minggu'; } });
+      $('#tMingguAuto', el).onclick = () => { const v = autoW(); if (v) $('#tMinggu', el).value = v; };
       $('#termSave', el).onclick = () => {
         const f = $('#termForm', el), fd = new FormData(f), err = $('#termErr', el);
-        const p = { term_id: id || '', tahun_ajaran: fd.get('tahun_ajaran').trim(), term: +fd.get('term'), tanggal_mulai: fd.get('tanggal_mulai'), tanggal_selesai: fd.get('tanggal_selesai'), batas_rpp: fd.get('batas_rpp'), unit_scope: fd.getAll('unit_scope').indexOf('ALL') >= 0 || !fd.getAll('unit_scope').length ? 'ALL' : fd.getAll('unit_scope').join(',') };
-        const bad = !/^\d{4}\/\d{4}$/.test(p.tahun_ajaran) ? 'Tahun ajaran harus berformat 2026/2027.' : (!p.tanggal_mulai || !p.tanggal_selesai || p.tanggal_selesai <= p.tanggal_mulai) ? 'Rentang tanggal term tidak valid.' : '';
+        const p = { term_id: id || '', tahun_ajaran: fd.get('tahun_ajaran').trim(), term: +fd.get('term'), tanggal_mulai: fd.get('tanggal_mulai'), tanggal_selesai: fd.get('tanggal_selesai'), batas_rpp: fd.get('batas_rpp'), minggu_efektif: +fd.get('minggu_efektif') || 0, unit_scope: fd.getAll('unit_scope').indexOf('ALL') >= 0 || !fd.getAll('unit_scope').length ? 'ALL' : fd.getAll('unit_scope').join(',') };
+        const bad = !/^\d{4}\/\d{4}$/.test(p.tahun_ajaran) ? 'Tahun ajaran harus berformat 2026/2027.' : (!p.tanggal_mulai || !p.tanggal_selesai || p.tanggal_selesai <= p.tanggal_mulai) ? 'Rentang tanggal term tidak valid.' : (p.minggu_efektif && (p.minggu_efektif < 1 || p.minggu_efektif > 30)) ? 'Minggu efektif harus 1–30.' : '';
         if (bad) { err.hidden = false; err.innerHTML = ic('exclamation-circle') + ' ' + bad; return; }
         const prev = clone(S.terms), tid = id || uid();
-        const obj = Object.assign({}, id ? termById(id) : { status: 'DRAFT' }, p, { term_id: tid, kode: p.tahun_ajaran + ' - Term ' + p.term, semester: p.term <= 2 ? 'Ganjil' : 'Genap' });
+        const auto = autoWeeks(p.tanggal_mulai, p.tanggal_selesai), manual = p.minggu_efektif && p.minggu_efektif !== auto;
+        if (!manual) p.minggu_efektif = 0;
+        const obj = Object.assign({}, id ? termById(id) : { status: 'DRAFT' }, p, { term_id: tid, kode: p.tahun_ajaran + ' - Term ' + p.term, semester: p.term <= 2 ? 'Ganjil' : 'Genap', minggu_efektif: manual ? p.minggu_efektif : auto, minggu_manual: !!manual });
         const i = S.terms.findIndex(t2 => t2.term_id === tid); if (i >= 0) S.terms[i] = obj; else S.terms.unshift(obj);
         p.term_id = tid;
         Outbox.push('term.save', p, { key: 'term:' + tid, prev, label: 'Simpan term' });
@@ -2631,6 +2789,15 @@ function refDrawer(id) {
 }
 Object.assign(ACT, {
   'm.tab': el => { S.ui.mTab = el.dataset.k; renderRoute(false); },
+  'm.spUnit': el => { S.ui.spUnit = el.dataset.k; renderRoute(false); },
+  'm.spSave': () => {
+    const unit = S.ui.spUnit, cells = $$('[data-sp]').map(i => { const [mapel, kelas] = i.dataset.sp.split('|'); return { mapel, kelas, nilai: Math.max(0, Math.min(40, Math.round(+i.value || 0))) }; });
+    const prev = clone(S.refs);
+    // Optimistic: perbarui master lokal agar anggaran di Analisis Chapter langsung berubah
+    cells.forEach(c => { const kode = [unit, c.mapel, c.kelas].join('|'), r = S.refs.find(x => x.kategori === 'SUBJ_PERIOD' && x.kode === kode); if (r) { r.nilai = c.nilai; r.aktif = c.nilai > 0; } else if (c.nilai > 0) S.refs.push({ ref_id: uid(), kategori: 'SUBJ_PERIOD', kode, label: refLabel('SUBJECT', c.mapel) + ' · ' + gradeLabel(c.kelas), deskripsi: unit, nilai: c.nilai, urutan: 99, aktif: true }); });
+    Outbox.push('subjperiod.save', { unit, cells }, { key: 'sp:' + unit, prev, label: 'Simpan period per mapel' });
+    persist(); renderRoute(false); toast('success', 'Period per mapel disimpan', `${cells.filter(c => c.nilai > 0).length} mapel × kelas terisi untuk ${unitShort(unit)}.`);
+  },
   'm.term': el => termDrawer(el.dataset.id),
   'm.ref': el => refDrawer(el.dataset.id),
   'm.refToggle': el => { const r = S.refs.find(x => x.ref_id === el.dataset.id); if (!r) return; const prev = clone(S.refs); r.aktif = el.checked; Outbox.push('ref.save', r, { key: 'ref:' + r.ref_id, prev }); persist(); toast('success', r.aktif ? 'Diaktifkan' : 'Dinonaktifkan', r.label); },
@@ -2651,6 +2818,7 @@ Object.assign(ACT, {
 });
 const masterRecon = setter => ({ ok(data) { setter(data); persist(); if (S.route.name === 'master') refreshCurrentQuiet(); }, fail(err, item) { if (item.prev) setter(item.prev); toast('error', 'Master data gagal disimpan', err.message); refreshCurrentQuiet(); } });
 RECON['ref.save'] = masterRecon(d => { S.refs = d; });
+RECON['subjperiod.save'] = masterRecon(d => { S.refs = d; });
 RECON['term.save'] = masterRecon(d => { S.terms = d; });
 RECON['term.status'] = masterRecon(d => { S.terms = d; const a = d.find(t => t.status === 'ACTIVE'); S.activeTermId = a ? a.term_id : S.activeTermId; renderShell(); });
 
@@ -2709,7 +2877,8 @@ PAGES.users = {
         <button class="link-btn fs-sm mt-3" data-act="m.audit">Lihat Log Lengkap ${ic('arrow-right')}</button></section></div>
     </div>
     <section class="card-x mt-4"><div class="card-head"><div><h3>Identitas Aplikasi & Parameter Akademik</h3><div class="sub">Tersimpan di sheet AppConfig · ID penyimpanan dikelola di Script Properties.</div></div><button class="btn btn-primary btn-sm" data-act="cfg.saveAll">${ic('check2')} Simpan Pengaturan</button></div>
-      <div class="row g-3">${[['appName', 'Nama aplikasi'], ['schoolName', 'Nama sekolah'], ['schoolSub', 'Sub-judul kop dokumen'], ['logoUrl', 'URL logo (opsional)'], ['sesi_per_minggu', 'Pertemuan per minggu (target sesi)'], ['jp_per_minggu', 'Jam pelajaran per minggu'], ['menit_per_jp', 'Menit per JP']].map(k => `<div class="col-md-${k[0] === 'schoolSub' ? 8 : 4}"><label class="form-label"><span>${E(k[1])}</span></label><input class="form-control" data-cfg="${k[0]}" value="${E(c[k[0]] || '')}"></div>`).join('')}
+      <div class="row g-3">${[['appName', 'Nama aplikasi'], ['schoolName', 'Nama sekolah'], ['schoolSub', 'Sub-judul kop dokumen'], ['logoUrl', 'URL logo (opsional)']].map(k => `<div class="col-md-${k[0] === 'schoolSub' ? 8 : 4}"><label class="form-label"><span>${E(k[1])}</span></label><input class="form-control" data-cfg="${k[0]}" value="${E(c[k[0]] || '')}"></div>`).join('')}
+        <div class="col-md-4"><label class="form-label"><span>Aturan matriks diferensiasi</span></label><select class="form-select" data-cfg="diff_mode"><option value="SATU" ${c.diff_mode !== 'BARIS' ? 'selected' : ''}>Hanya satu dari 9 kotak</option><option value="BARIS" ${c.diff_mode === 'BARIS' ? 'selected' : ''}>Satu pilihan per baris</option></select></div>
         <div class="col-md-4"><label class="form-label"><span>Tampilkan akun demo di login</span></label><select class="form-select" data-cfg="demo_mode"><option value="Y" ${c.demo_mode === 'Y' ? 'selected' : ''}>Ya (mode uji coba)</option><option value="N" ${c.demo_mode !== 'Y' ? 'selected' : ''}>Tidak (produksi)</option></select></div>
         <div class="col-md-8"><label class="form-label" for="cfgAppUrl"><span>Alamat aplikasi (URL GitHub Pages)</span><span class="hint">dipakai tombol "Buka LMS ICM" di email</span></label><div class="d-flex gap-2"><input id="cfgAppUrl" class="form-control" data-cfg="app_url" inputmode="url" value="${E(c.app_url || '')}" placeholder="https://username.github.io/lms-icm/"><button type="button" class="btn btn-soft text-nowrap" data-act="cfg.useHere" title="Isi dengan alamat halaman yang sedang dibuka">${ic('geo-alt')} Alamat ini</button></div></div>
         <div class="col-12"><div class="inset"><div class="d-flex flex-wrap gap-3 align-items-start"><span class="icon-tile sm">${ic('google')}</span><div class="flex-grow-1 min-w-0" style="flex-basis:260px"><b class="d-block">Login Google (opsional)</b><div class="fs-sm text-2">Isi <b>OAuth Client ID</b> (jenis <i>Web application</i>) agar tombol "Masuk dengan Google" muncul di halaman login. Disimpan di Script Properties, bukan di Sheets.</div>
@@ -2781,7 +2950,7 @@ Object.assign(ACT, {
     try { const r = await call('secret.save', { kunci: 'GOOGLE_CLIENT_ID', nilai: '__HAPUS__' }); S.config.secrets = Object.assign({}, S.config.secrets, { GOOGLE_CLIENT_ID: r }); LS.del('boot'); toast('success', 'Login Google dinonaktifkan'); renderRoute(false); }
     catch (e) { toast('error', 'Gagal', e.message); }
   },
-  'cfg.saveAll': () => { const c = S.config.all = S.config.all || {}, p = {}; $$('[data-cfg]').forEach(i => { p[i.dataset.cfg] = i.value; c[i.dataset.cfg] = i.value; }); Object.assign(S.config, { appName: p.appName, schoolName: p.schoolName, schoolSub: p.schoolSub, logoUrl: p.logoUrl, sesi_per_minggu: +p.sesi_per_minggu || 2, jp_per_minggu: +p.jp_per_minggu || 4, menit_per_jp: +p.menit_per_jp || 45, sla_hari: +p.sla_hari || 2 }); Outbox.push('config.save', p, { key: 'config' }); persist(); renderShell(); toast('success', 'Pengaturan disimpan', 'Berlaku untuk semua pengguna setelah sinkron.'); },
+  'cfg.saveAll': () => { const c = S.config.all = S.config.all || {}, p = {}; $$('[data-cfg]').forEach(i => { p[i.dataset.cfg] = i.value; c[i.dataset.cfg] = i.value; }); Object.assign(S.config, { appName: p.appName, schoolName: p.schoolName, schoolSub: p.schoolSub, logoUrl: p.logoUrl, diff_mode: p.diff_mode || 'BARIS', sla_hari: +p.sla_hari || 2 }); Outbox.push('config.save', p, { key: 'config' }); persist(); renderShell(); toast('success', 'Pengaturan disimpan', 'Berlaku untuk semua pengguna setelah sinkron.'); },
   'sig.upload': el => uploadSignature(el.dataset.id)
 });
 RECON['config.save'] = { ok(data) { const keep = S.config.all; S.config = Object.assign({}, S.config, data); if (!data.all && keep) S.config.all = keep; persist(); }, fail(err) { toast('error', 'Pengaturan gagal disimpan', err.message); syncNow(false); } };
