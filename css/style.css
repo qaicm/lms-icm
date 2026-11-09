@@ -687,3 +687,17 @@ textarea.form-control { min-height: 110px; resize: vertical; line-height: 1.55; 
   .sidebar, .topbar, .bottom-nav, .sticky-bar, .toast-root { display: none !important; }
   .main { margin: 0; }
 }
+
+/* ── Pilihan alokasi sesi (1 Period / 2 Period) ── */
+.period-card { margin-bottom: 16px; }
+.period-pick { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+.period-pick button { min-width: 132px; min-height: 52px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px;
+  padding: 8px 16px; border-radius: 14px; border: 1.5px solid var(--border); background: var(--surface-pure); color: var(--text); text-align: left;
+  transition: border-color .15s var(--ease), background .15s var(--ease), box-shadow .15s var(--ease); }
+.period-pick button b { font-size: .92rem; }
+.period-pick button span { font-size: .76rem; color: var(--text-2); }
+.period-pick button:hover { border-color: var(--primary); }
+.period-pick button.on { border-color: var(--primary); background: var(--primary-tint, #EDE9FB); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent); }
+.period-pick button.on b { color: var(--primary-strong); }
+.period-pick button:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+@media (max-width: 767px) { .period-pick { width: 100%; } .period-pick button { flex: 1 1 0; min-width: 0; } }

@@ -123,7 +123,7 @@ Yang dibuat otomatis:
 - Folder Drive **LMS ICM** dan spreadsheet database berisi 16 sheet bertajuk.
 - Kunci rahasia `SESSION_SECRET` dan `PW_PEPPER` di **Script Properties** (aman, tidak terlihat di kode/sheet).
 - Master data (unit, mapel, kelas, ICM Value, sequence, diferensiasi, durasi), term, 14 akun demo, serta contoh chapter & lesson plan.
-- Empat trigger otomatis (lihat [Bagian F](#f3-trigger-otomatis)).
+- Empat trigger otomatis (lihat [Bagian F](#f5-trigger-otomatis)).
 
 > Fungsi ini aman dijalankan ulang — data yang sudah ada tidak digandakan.
 
@@ -371,7 +371,7 @@ Masuk sebagai **Super Admin** (`admin@icm.sch.id`), lalu:
 3. **Nonaktifkan** akun demo yang tidak dipakai (centang → *Nonaktifkan*), atau **Reset Password** jika akunnya diteruskan.
 4. Ganti kata sandi akun **admin** sendiri di *Profil & Akun*.
 5. **Tanda tangan pimpinan:** pimpinan mengunggah spesimen (PNG/JPG) di *Profil & TTD*, atau Super Admin di kartu *Tanda Tangan Digital*. Berkas TTD disimpan di folder Drive terbatas dan **tidak pernah** dikirim ke browser.
-6. Masuk sebagai **QA** → **Master Data** → periksa *Tahun & Term* (aktifkan term berjalan), Mata Pelajaran, Tingkat Kelas, ICM Value, Sequence of Teaching, Pilihan Durasi.
+6. Masuk sebagai **QA** → **Master Data** → periksa *Tahun & Term* (aktifkan term berjalan), Mata Pelajaran, Tingkat Kelas, ICM Value, Sequence of Teaching, **Alokasi Sesi (Period)**, Pilihan Durasi.
 7. (Opsional) Hapus data contoh di sheet `Chapters`, `SubChapters`, `LearningObjectives`, `LessonPlans` (beserta sheet `LessonPlan…`), `Approvals`, `Attachments` — **hapus baris data saja, jangan baris judul (baris 1)**. Lakukan sebelum guru mulai mengisi.
 8. Bagikan alamat `https://USERNAME.github.io/lms-icm/` ke guru. Di HP, pengguna bisa memilih **Tambahkan ke Layar Utama** agar terbuka seperti aplikasi.
 
@@ -400,7 +400,44 @@ git push
 
 Situs diperbarui otomatis dalam 1–2 menit. Jika masih tampil versi lama, tekan **Ctrl+Shift+R** (muat ulang paksa) atau buka di jendela Incognito.
 
-### F3. Trigger otomatis
+### F3. Alokasi sesi: 1 Period / 2 Period
+
+Setiap lesson plan punya pilihan **Alokasi waktu sesi ini** di langkah 4 (*Skenario & Waktu*). Bawaannya:
+
+| Pilihan | Menit |
+|---|---|
+| 1 Period | 40 |
+| 2 Period | 80 |
+
+- Saat guru memilih period, durasi Pendahuluan–Inti–Penutup otomatis disesuaikan (40 → 5+30+5, 80 → 10+60+10). Guru tetap bebas mengubah tiap durasi.
+- Bila total melebihi alokasi, muncul peringatan dan tombol **Sesuaikan ke … menit**. Lesson plan **tidak bisa dikirim** ke pimpinan sebelum totalnya ≤ alokasi.
+- Lesson plan baru di chapter yang sama otomatis memakai pilihan period terakhir guru.
+- PDF resmi mencantumkan alokasi, misalnya *80 menit (alokasi 2 Period · 80 menit)*.
+
+**Mengubah atau menambah pilihan** (QA / Super Admin): **Master Data → Alokasi Sesi (Period)** → *Tambah* atau ✏️.
+- **Menit per sesi**: panjang total sesi (mis. `40`, `80`, atau `120` untuk 3 Period).
+- **Berlaku untuk unit**: kosongkan agar berlaku di semua unit, atau isi kode unit bila panjang period berbeda, mis. `ECP,PS` untuk period 35 menit di KB-TK & SD dan `HS,MS` untuk period 40 menit di SMP & SMA.
+- Pilihan yang dinonaktifkan tidak tampil lagi bagi guru; lesson plan lama yang memakainya tetap tersimpan.
+
+### F4. Memasang pembaruan ini di instalasi yang sudah berjalan
+
+Bila LMS ICM sudah terpasang sebelum fitur Period ada:
+
+1. **Backend:** tempel `Kode.gs` versi baru → **Ctrl+S** → **Terapkan → Kelola deployment → ✏️ → Versi baru → Terapkan** (URL `/exec` tetap sama).
+2. **Tambahkan master Period:** pilih fungsi **`setupAppEnvironment`** → ▶ **Jalankan**. Karena database sudah berisi, fungsi ini **tidak** mengubah atau menggandakan data; ia hanya menambahkan *1 Period = 40* dan *2 Period = 80*. Log menampilkan `🆕 Master "Alokasi Sesi (Period)" ditambahkan`.
+3. **Frontend:** ekstrak ZIP baru → salin isi folder `lms-icm` (kecuali `js/config.js` — **pertahankan `config.js` lama Anda** yang sudah berisi URL `/exec`) ke `Documents\lms-icm`, menimpa berkas lama → lalu:
+
+```powershell
+git add .
+git commit -m "Fitur alokasi 1 Period / 2 Period"
+git push
+```
+
+4. Tunggu 1–2 menit, buka situs, tekan **Ctrl+Shift+R**.
+
+Lesson plan lama (sebelum pembaruan) otomatis memakai period yang menitnya paling dekat dengan total skenarionya — misalnya draft 90 menit dianggap *2 Period*, lalu tampil peringatan "Lebih 10 menit" dengan tombol **Sesuaikan**.
+
+### F5. Trigger otomatis
 
 Dipasang oleh `setupAppEnvironment`. Untuk memasang ulang: pilih fungsi **`installTriggers`** → ▶ Jalankan (aman diulang). Lihat daftarnya di ikon **⏰ Pemicu** (Triggers).
 
@@ -473,6 +510,8 @@ Tombol "Masuk dengan Google" kadang terblokir di dalam iframe (pembatasan cookie
 | `remote origin already exists` | `git remote add` pernah dijalankan | Lewati; bila URL salah: `git remote set-url origin https://github.com/USERNAME/lms-icm.git` |
 | `error: src refspec main does not match any` | Belum ada commit | Jalankan `git add .` lalu `git commit -m "Upload pertama"` |
 | `Updates were rejected because the remote contains work` | Repo dibuat dengan README | `git pull --rebase origin main` lalu `git push` |
+| Peringatan *"Lebih … menit dari alokasi"* / tidak bisa kirim | Total skenario melebihi period yang dipilih | Klik **Sesuaikan ke … menit**, atau pilih period lain di langkah 4 |
+| Pilihan 1 Period / 2 Period tidak muncul | Master Period belum ditambahkan | Jalankan `setupAppEnvironment` sekali (F4 langkah 2) |
 | Tampilan aneh setelah pembaruan besar | Cache data lama di perangkat | *Profil & Akun → Kosongkan cache perangkat*, muat ulang |
 
 ### Perbaikan salah folder (situs 404, repo berisi folder `lms-icm`)

@@ -111,6 +111,34 @@ const refDesc = (kat, kode) => { const r = S.refs.find(x => x.kategori === kat &
 const unitLabel = k => refLabel('UNIT', k);
 const unitShort = k => { const r = S.refs.find(x => x.kategori === 'UNIT' && x.kode === k); return r && r.deskripsi ? r.deskripsi : k; };
 const unitAlokasi = k => { const r = S.refs.find(x => x.kategori === 'UNIT' && x.kode === k); return r && r.nilai ? +r.nilai : 0; };
+/** Pilihan alokasi sesi (1 Period, 2 Period, …) untuk unit tertentu — logika sama dengan periodOpts_ di server. */
+function periodOpts(unit) {
+  const opts = refsOf('PERIOD').filter(r => +r.nilai > 0).filter(r => {
+    const sc = String(r.deskripsi || '').toUpperCase().split(/[\s,;]+/).filter(Boolean);
+    return !sc.length || sc.includes('ALL') || sc.includes(String(unit).toUpperCase());
+  }).map(r => ({ kode: r.kode, label: r.label, menit: +r.nilai }));
+  if (!opts.length) { const m = unitAlokasi(unit); if (m) opts.push({ kode: 'UNIT', label: 'Alokasi unit', menit: m }); }
+  return opts;
+}
+/** Alokasi yang berlaku untuk sebuah LP: pilihan guru → yang menitnya sama dengan total → pilihan pertama. */
+function lpAlok(lp, ch) {
+  const opts = periodOpts((ch && ch.unit) || lp.unit), tot = (+((lp.scenarios || {}).beginning || {}).menit || 0) + (+((lp.scenarios || {}).middle || {}).menit || 0) + (+((lp.scenarios || {}).end || {}).menit || 0);
+  const hit = opts.find(o => o.kode === lp.alok_kode);
+  if (hit || !opts.length) return hit || null;
+  return tot > 0 ? opts.slice().sort((a, b) => Math.abs(a.menit - tot) - Math.abs(b.menit - tot) || b.menit - a.menit)[0] : opts[0];
+}
+const alokText = a => a ? a.label + ' · ' + a.menit + ' menit' : '';
+const round5 = x => Math.round(x / 5) * 5;
+/** Skenario bawaan untuk alokasi m menit (±15% pembuka, ±15% penutup, sisanya inti). */
+function defScen(m) { const b = Math.max(5, round5(m * 0.15)); return { beginning: b, middle: Math.max(5, m - 2 * b), end: b }; }
+/** Skalakan durasi skenario secara proporsional agar totalnya tepat m menit (kelipatan 5, inti menyerap sisa). */
+function fitScen(sc, m) {
+  const tot = (+sc.beginning.menit || 0) + (+sc.middle.menit || 0) + (+sc.end.menit || 0);
+  let b, e;
+  if (tot > 0) { b = Math.max(5, round5(sc.beginning.menit * m / tot)); e = Math.max(5, round5(sc.end.menit * m / tot)); }
+  if (!tot || m - b - e < 5) { const d = defScen(m); b = d.beginning; e = d.end; }
+  sc.beginning.menit = b; sc.end.menit = e; sc.middle.menit = m - b - e;
+}
 const gradeLabel = k => refLabel('GRADE', k);
 const termById = id => S.terms.find(t => t.term_id === id) || null;
 const activeTerm = () => termById(S.activeTermId) || S.terms.find(t => t.status === 'ACTIVE') || S.terms[0] || null;
@@ -1451,7 +1479,7 @@ const STEPS = [
   { t: 'Identitas & Bab', i: 'journal-bookmark' }, { t: 'TP & Nilai ICM', i: 'bullseye' }, { t: 'Diferensiasi', i: 'grid-3x3-gap' },
   { t: 'Skenario & Waktu', i: 'clock-history' }, { t: 'Lampiran & Kirim', i: 'send' }
 ];
-const CONTENT_KEYS = ['chapter_id', 'sub_ids', 'session_no', 'tanggal_ajar', 'lo_ids', 'atp_micro_lo', 'icm', 'seq', 'diff', 'essential_question', 'terminology', 'scenarios'];
+const CONTENT_KEYS = ['chapter_id', 'sub_ids', 'session_no', 'tanggal_ajar', 'lo_ids', 'atp_micro_lo', 'icm', 'seq', 'diff', 'essential_question', 'terminology', 'scenarios', 'alok_kode'];
 const SCEN = [
   { k: 'beginning', key: 'A', t: 'Kegiatan Awal (Beginning)', s: 'Apersepsi, motivasi, dan orientasi tujuan', ph: 'Pembukaan, salam, apersepsi, pembacaan tujuan pembelajaran & orientasi materi…' },
   { k: 'middle', key: 'B', t: 'Kegiatan Inti (Middle)', s: 'Mini lesson, praktik terbimbing, diskusi kelompok', ph: 'Penyampaian mini lesson / konsep utama, aktivitas diskusi kelompok / praktik mandiri, umpan balik langsung…' },
@@ -1460,10 +1488,13 @@ const SCEN = [
 const ALLOWED_ATT = { pdf: 1, docx: 1, pptx: 1 };
 
 function emptyLp(chapterId, session) {
+  // Alokasi awal: ikuti lesson plan terakhir di chapter yang sama (guru biasanya konsisten per mapel), lalu bawaan unit.
+  const ch = chapterById(chapterId) || {}, last = lpsOfChapter(chapterId || '').slice().sort((a, b) => ts(b.diubah_pada) - ts(a.diubah_pada)).find(l => l.alok_kode);
+  const opts = periodOpts(ch.unit), a = (last && opts.find(o => o.kode === last.alok_kode)) || opts[0], d = defScen(a ? a.menit : 80);
   return {
     lp_id: uid(), chapter_id: chapterId || '', sub_ids: [], session_no: session || 0, tanggal_ajar: '', lo_ids: [], atp_micro_lo: '', icm: [], seq: [], diff: [],
-    essential_question: '', terminology: '', scenarios: { beginning: { menit: 15, desc: '' }, middle: { menit: 60, desc: '' }, end: { menit: 15, desc: '' } },
-    status: 'DRAFT', revisi_ke: 1, kode_dok: '', catatan_terakhir: '', reviewer_terakhir: '', jumlah_return: 0, full: true, _new: true
+    essential_question: '', terminology: '', scenarios: { beginning: { menit: d.beginning, desc: '' }, middle: { menit: d.middle, desc: '' }, end: { menit: d.end, desc: '' } },
+    alok_kode: a ? a.kode : '', status: 'DRAFT', revisi_ke: 1, kode_dok: '', catatan_terakhir: '', reviewer_terakhir: '', jumlah_return: 0, full: true, _new: true
   };
 }
 function nextFreeSession(chId, exceptId) {
@@ -1611,6 +1642,8 @@ function validateBuilder(lp) {
   if (!String(lp.terminology).trim()) e[3].push('Isi Terminology & Trigger Question.');
   const sc = lp.scenarios;
   if (SCEN.some(s => !String(sc[s.k].desc).trim() || !(+sc[s.k].menit > 0))) e[4].push('Lengkapi skenario Beginning, Middle, dan End beserta durasinya.');
+  const al = lpAlok(lp, ch), tot = scenTotal(sc);
+  if (al && tot > al.menit) e[4].push('Total durasi ' + tot + ' menit melebihi alokasi ' + alokText(al) + '.');
   if (!S.atts.filter(a => a.lp_id === lp.lp_id).length) e[5].push('Unggah minimal satu lampiran pendukung (PDF, DOCX, atau PPTX).');
   if (Object.keys(S.uploads).some(k => S.uploads[k].lp_id === lp.lp_id)) e[5].push('Tunggu unggahan lampiran selesai.');
   return e;
@@ -1700,16 +1733,30 @@ function stepDiferensiasi(lp) {
 }
 
 function durStripHtml(lp, ch) {
-  const sc = lp.scenarios, total = scenTotal(sc), alok = unitAlokasi(ch.unit), over = alok && total > alok;
+  const sc = lp.scenarios, total = scenTotal(sc), al = lpAlok(lp, ch), alok = al ? al.menit : 0, over = alok && total > alok, under = alok && total < alok;
   const w = k => (total ? (+sc[k].menit / total) * 100 : 33.3);
-  return `<div class="dur-strip ${over ? 'warn' : ''}"><div class="d-flex justify-content-between align-items-center flex-wrap gap-2"><b>${ic('stopwatch')} Total Durasi ${total} Menit</b><span class="chip ${over ? 'amber' : 'green'}">${over ? ic('exclamation-triangle') + ' Melebihi alokasi ' + alok + ' menit' : ic('check-circle') + ' Sesuai alokasi' + (alok ? ': ' + alok + ' menit' : '')}</span></div>
+  const fitBtn = `<button class="btn btn-soft btn-sm" data-act="bld.fit">${ic('magic')} Sesuaikan ke ${alok} menit</button>`;
+  const chip = over ? `<span class="chip amber">${ic('exclamation-triangle')} Lebih ${total - alok} menit dari alokasi ${alok} menit</span>${fitBtn}`
+    : under ? `<span class="chip sky">${ic('hourglass-split')} Sisa ${alok - total} menit dari alokasi ${alok} menit</span>${fitBtn}`
+    : `<span class="chip green">${ic('check-circle')} Sesuai alokasi${al ? ': ' + E(alokText(al)) : ''}</span>`;
+  return `<div class="dur-strip ${over ? 'warn' : ''}"><div class="d-flex justify-content-between align-items-center flex-wrap gap-2"><b>${ic('stopwatch')} Total Durasi ${total} Menit</b><div class="d-flex align-items-center gap-2 flex-wrap">${chip}</div></div>
     <div class="dur-bar"><span style="width:${w('beginning')}%;background:var(--sky)"></span><span style="width:${w('middle')}%;background:var(--primary)"></span><span style="width:${w('end')}%;background:var(--amber)"></span></div>
     <div class="dur-legend"><span><span class="dot sky"></span> Pendahuluan: ${sc.beginning.menit}m (${Math.round(w('beginning'))}%)</span><span><span class="dot"></span> Kegiatan inti: ${sc.middle.menit}m (${Math.round(w('middle'))}%)</span><span><span class="dot amber"></span> Penutup: ${sc.end.menit}m (${Math.round(w('end'))}%)</span></div></div>`;
+}
+
+function periodPickHtml(lp, ch) {
+  const opts = periodOpts(ch.unit), al = lpAlok(lp, ch);
+  if (!opts.length) return '';
+  return `<section class="bld-card period-card"><div class="d-flex flex-wrap gap-3 align-items-center justify-content-between">
+    <div class="d-flex gap-3 align-items-center min-w-0"><span class="icon-tile sm">${ic('hourglass-split')}</span><div><b>Alokasi waktu sesi ini <span style="color:var(--rose)">*</span></b><div class="fs-xs text-2">Pilih jumlah period untuk pertemuan ini. Durasi skenario menyesuaikan otomatis.</div></div></div>
+    <div class="period-pick" role="radiogroup" aria-label="Alokasi waktu sesi">${opts.map(o => `<button type="button" role="radio" aria-checked="${al && al.kode === o.kode}" class="${al && al.kode === o.kode ? 'on' : ''}" data-act="bld.alok" data-k="${E(o.kode)}"><b>${E(o.label)}</b><span>${o.menit} menit</span></button>`).join('')}</div>
+  </div></section>`;
 }
 
 function stepSkenario(lp, ch) {
   const durs = refsOf('DURATION');
   return `<div class="mb-3"><div class="eyebrow">Modul perencanaan sesi · ${E(refLabel('SUBJECT', ch.mata_pelajaran || ''))} ${E(gradeLabel(ch.kelas || ''))} · ${E(ch.nama_chapter || '')}</div><h2 style="font-size:1.35rem;font-weight:800;margin-top:4px">Penyusunan Skenario & Alokasi Pembelajaran</h2><div class="text-2 fs-md">Rancang sintaks alur pembelajaran bertahap (Beginning, Middle, End).</div></div>
+  ${periodPickHtml(lp, ch)}
   ${SCEN.map(s => { const v = lp.scenarios[s.k]; return `<section class="scen ${s.key}"><div class="scen-head"><span class="scen-tile">${s.key}</span><div class="min-w-0"><b>${E(s.t)}</b><div class="fs-xs text-2">${E(s.s)}</div></div>
     <select class="form-select" data-b="scenarios.${s.k}.menit" data-num="1" aria-label="Durasi ${E(s.t)}">${(durs.some(d => +d.kode === +v.menit) ? durs : durs.concat([{ kode: String(v.menit), label: v.menit + ' Menit' }])).map(d => `<option value="${E(d.kode)}" ${+d.kode === +v.menit ? 'selected' : ''}>${E(d.label)}</option>`).join('')}</select></div>
     <label class="fs-xs fw-7 text-3 mb-1 d-block" style="letter-spacing:.06em">URAIAN SINTAKS AKTIVITAS GURU & MURID <span style="color:var(--rose)">*</span></label>
@@ -1806,12 +1853,30 @@ Object.assign(ACT, {
     Outbox.push('file.delete', { att_id: a.att_id }, { key: 'att:' + a.att_id, prev: a });
   },
   'att.preview': el => previewAttachment(el.dataset.id),
+  'bld.alok': el => {
+    const b = S.builder; if (!b) return;
+    const lp = b.lp, ch = chapterById(lp.chapter_id) || {}, before = lpAlok(lp, ch), tot = scenTotal(lp.scenarios);
+    const next = periodOpts(ch.unit).find(o => o.kode === el.dataset.k); if (!next || (before && before.kode === next.kode && lp.alok_kode)) return;
+    lp.alok_kode = next.kode;
+    // Bila durasi sebelumnya tepat memenuhi alokasi lama (atau masih kosong), skalakan otomatis ke alokasi baru.
+    const auto = !before || tot === before.menit || !tot;
+    if (auto && tot !== next.menit) fitScen(lp.scenarios, next.menit);
+    markDirty(); bldRerender();
+    if (auto && tot !== next.menit) toast('info', next.label + ' dipilih', `Durasi skenario disesuaikan: ${lp.scenarios.beginning.menit} + ${lp.scenarios.middle.menit} + ${lp.scenarios.end.menit} = ${next.menit} menit.`, { page: 1, id: 'alok' });
+  },
+  'bld.fit': () => {
+    const b = S.builder; if (!b) return;
+    const lp = b.lp, al = lpAlok(lp, chapterById(lp.chapter_id) || {}); if (!al) return;
+    if (!lp.alok_kode) lp.alok_kode = al.kode;
+    fitScen(lp.scenarios, al.menit); markDirty(); bldRerender();
+    toast('success', 'Durasi disesuaikan', `${lp.scenarios.beginning.menit} + ${lp.scenarios.middle.menit} + ${lp.scenarios.end.menit} = ${al.menit} menit.`, { page: 1, id: 'alok' });
+  },
   'bld.submit': async () => {
     const b = S.builder; if (!b) return;
     b.tried = true;
     const v = validateBuilder(b.lp), bad = [1, 2, 3, 4, 5].filter(i => v[i].length);
     if (bad.length) { b.step = bad.indexOf(b.step) >= 0 ? b.step : bad[0]; bldRerender(); toast('warning', 'Belum bisa diajukan', sum(bad.map(i => v[i].length)) + ' isian wajib belum lengkap.', { page: 1, id: 'val' }); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
-    const lp = b.lp, ch = chapterById(lp.chapter_id), alok = unitAlokasi(ch.unit), tot = scenTotal(lp.scenarios);
+    const lp = b.lp, ch = chapterById(lp.chapter_id), alok = (lpAlok(lp, ch) || {}).menit || 0, tot = scenTotal(lp.scenarios);
     const okk = await confirmDlg({ title: 'Kirim ke pimpinan?', icon: 'send', message: `<b>${E(ch.nama_chapter)} · Sesi ${lp.session_no}</b> akan berstatus <b>Pending Approval</b> dan tidak dapat disunting sampai diputuskan.${lp.status === 'RETURNED' ? `<br>Ini akan menjadi <b>revisi ke-${(+lp.revisi_ke || 1) + 1}</b>.` : ''}${alok && tot > alok ? `<div class="notice amber mt-2"><span class="ic">${ic('exclamation-triangle')}</span><div>Total durasi ${tot} menit melebihi alokasi ${alok} menit.</div></div>` : ''}`, ok: 'Ya, Kirim ke Pimpinan' });
     if (!okk) return;
     const known = S.lps.find(l => l.lp_id === lp.lp_id);
@@ -1878,7 +1943,7 @@ function docDataClient(lp, ch, x) {
     mode: x.mode || 'view', school: { name: cfg('schoolName', ''), sub: cfg('schoolSub', '') }, kode_dok: lp.kode_dok || 'DRAFT (kode dibuat saat sinkron)', status: lp.status, revisi_ke: lp.revisi_ke || 1, verif_code: lp.verif_code,
     chapter_nama: ch.nama_chapter || lp.chapter_label, subs: (lp.sub_ids || []).map(s => subMap[s] ? subMap[s].kode + ' ' + subMap[s].nama_sub : '').filter(Boolean),
     session_no: lp.session_no, tanggal_ajar: lp.tanggal_ajar, unit_label: unitRef.label || lp.unit, kelas: gradeLabel(ch.kelas || lp.kelas), mapel: refLabel('SUBJECT', ch.mata_pelajaran || lp.mata_pelajaran),
-    durasi_total: scenTotal(sc), alokasi: unitRef.nilai || '', teacher: x.teacher || { nama: S.me.nama, nip: S.me.nip },
+    durasi_total: scenTotal(sc), alokasi: alokText(lpAlok(lp, ch)), teacher: x.teacher || { nama: S.me.nama, nip: S.me.nip },
     los: (lp.lo_ids || []).map(id => loMap[id] ? { kode: loMap[id].kode, teks: loMap[id].teks_tp } : null).filter(Boolean),
     atp: lp.atp_micro_lo, icm: (lp.icm || []).map(k => refLabel('ICM_VALUE', k)), seq: (lp.seq || []).map(k => refLabel('SEQUENCE', k)),
     diff: (lp.diff || []).map(d => ({ a: refLabel('DIFF_ASPECT', d.a), p: refLabel('DIFF_PROFILE', d.p), note: d.note })),
@@ -2474,9 +2539,9 @@ Object.assign(ACT, {
 // BAGIAN 25 · MASTER DATA (Term, Unit, Mapel, Kelas, ICM, Sequence, Diferensiasi, Durasi)
 // ════════════════════════════════════════════════════════════
 const MASTER_TABS = [
-  { k: 'TERM', l: 'Tahun & Term', i: 'calendar3' }, { k: 'UNIT', l: 'Unit & Jenjang', i: 'bank', nilai: 'Alokasi menit/sesi' }, { k: 'SUBJECT', l: 'Mata Pelajaran', i: 'book' },
+  { k: 'TERM', l: 'Tahun & Term', i: 'calendar3' }, { k: 'UNIT', l: 'Unit & Jenjang', i: 'bank', nilai: 'Alokasi cadangan (menit)' }, { k: 'SUBJECT', l: 'Mata Pelajaran', i: 'book' },
   { k: 'GRADE', l: 'Tingkat Kelas', i: 'mortarboard', desk: 'Kode unit (ECP/PS/MS/HS)' }, { k: 'ICM_VALUE', l: 'ICM Value', i: 'heart' }, { k: 'SEQUENCE', l: 'Sequence of Teaching', i: 'list-ol' },
-  { k: 'DIFF_ASPECT', l: 'Aspek Diferensiasi', i: 'grid-3x3' }, { k: 'DIFF_PROFILE', l: 'Profil Diferensiasi', i: 'person-badge' }, { k: 'DURATION', l: 'Pilihan Durasi', i: 'stopwatch', nilai: 'Menit' }
+  { k: 'DIFF_ASPECT', l: 'Aspek Diferensiasi', i: 'grid-3x3' }, { k: 'DIFF_PROFILE', l: 'Profil Diferensiasi', i: 'person-badge' }, { k: 'PERIOD', l: 'Alokasi Sesi (Period)', i: 'hourglass-split', nilai: 'Menit per sesi', desk: 'Berlaku untuk unit (kosongkan = semua; mis. HS,MS)' }, { k: 'DURATION', l: 'Pilihan Durasi', i: 'stopwatch', nilai: 'Menit' }
 ];
 const termPill = st => `<span class="pill pill-${st === 'ACTIVE' ? 'ACTIVE' : st === 'CLOSED' ? 'CLOSED' : 'DRAFT'}">${st === 'ACTIVE' ? 'Active' : st === 'CLOSED' ? 'Closed' : 'Draft'}</span>`;
 PAGES.master = {
@@ -2658,7 +2723,7 @@ function userDrawer(id) {
   const units = String(x.unit).split(',');
   drawer({ eyebrow: 'Pengguna', title: id ? 'Edit ' + x.nama : 'Tambah Pengguna Baru', body: `<form id="usForm" class="d-grid gap-3">
     <div><label class="form-label"><span>Nama lengkap & gelar <span class="req">*</span></span></label><input class="form-control" name="nama" value="${E(x.nama)}" required></div>
-    <div><label class="form-label"><span>Surel institusi <span class="req">*</span></span></label><input type="email" class="form-control" name="email" value="${E(x.email)}" required></div>
+    <div><label class="form-label"><span>Email (Gmail atau email sekolah) <span class="req">*</span></span></label><input type="email" class="form-control" name="email" value="${E(x.email)}" required></div>
     <div class="row g-2"><div class="col-6"><label class="form-label"><span>NIP</span></label><input class="form-control" name="nip" value="${E(x.nip)}"></div><div class="col-6"><label class="form-label"><span>Peran <span class="req">*</span></span></label><select class="form-select" name="peran" id="usRole">${Object.keys(ROLE_LABEL).map(r => `<option value="${r}" ${x.peran === r ? 'selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}</select></div></div>
     <div><label class="form-label"><span>Jabatan</span></label><input class="form-control" name="jabatan" value="${E(x.jabatan)}" placeholder="mis. Guru Biologi / Kepala SMP"></div>
     <div id="usUnitWrap"><label class="form-label"><span>Unit</span><span class="hint">pimpinan boleh lebih dari satu</span></label><div class="chipcards">${UNIT_ORDER.map(u => `<label class="chipcard ${units.indexOf(u) >= 0 ? 'on' : ''}" style="cursor:pointer"><input type="checkbox" name="unit" value="${u}" class="d-none" ${units.indexOf(u) >= 0 ? 'checked' : ''}>${u}</label>`).join('')}</div></div>
