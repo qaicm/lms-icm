@@ -478,6 +478,13 @@ git push
 
 7. Tunggu 1–2 menit, buka situs, tekan **Ctrl+Shift+R**. Minta guru mengisi ulang Analisis Chapter dengan format baru.
 
+**Memastikan pembaruan benar-benar tampil.** Setelah login, lihat bagian bawah menu kiri: ada tulisan **"Versi LP3-…"** di bawah tombol *Keluar*. Bila tulisan itu tidak ada, yang tampil masih versi lama.
+
+Bila di halaman repo GitHub ada tanda **❌ merah** di samping commit terakhir (atau *Deployments → github-pages* merah), situs belum berhasil diperbarui:
+1. Klik tanda ❌ → **Details** untuk melihat penyebabnya, atau buka tab **Actions** → pilih proses yang gagal → **Re-run all jobs** (kegagalan sementara dari GitHub sering selesai setelah diulang).
+2. Pastikan di repo ada `index.html`, folder `css`, dan folder `js` (berisi `app.js`, `shared.js`, `config.js`), dan tanggal commit-nya sudah yang terbaru.
+3. Setelah tanda ✅ hijau muncul, buka situs lalu tekan **Ctrl+Shift+R**.
+
 ### F5. Trigger otomatis
 
 Dipasang oleh `setupAppEnvironment`. Untuk memasang ulang: pilih fungsi **`installTriggers`** → ▶ Jalankan (aman diulang). Lihat daftarnya di ikon **⏰ Pemicu** (Triggers).

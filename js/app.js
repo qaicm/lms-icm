@@ -20,6 +20,7 @@
 let BOOT = {};                                           // konfigurasi publik dari server (fn=boot), di-cache di perangkat
 const GAS_URL = String((window.APP_CONFIG && window.APP_CONFIG.GAS_URL) || '').trim();
 const CONFIG_OK = /^https?:\/\/[^\s]+\/exec$/.test(GAS_URL) && !/GANTI|XXXX/i.test(GAS_URL);
+window.APP_BUILD = 'LP3-261110-1027';
 const $ = (s, el) => (el || document).querySelector(s);
 const $$ = (s, el) => Array.from((el || document).querySelectorAll(s));
 const E = escHtml;                                       // dari kode bersama
@@ -803,6 +804,7 @@ function renderShell() {
     <div class="sb-foot">
       <div class="sb-user"><span class="avatar ${avatarTone(me.peran)}">${E(initials(me.nama))}</span><div class="who"><b class="clamp-1">${E(me.nama)}</b><span>${E(me.jabatan || ROLE_LABEL[me.peran])}</span></div></div>
       <button class="nav-i logout" data-act="logout" title="Keluar">${ic('box-arrow-right')}<span>Keluar</span></button>
+      <div class="fs-xs text-2 px-2 mt-1" title="Versi tampilan yang sedang berjalan" style="opacity:.75">Versi ${E(window.APP_BUILD || '')}</div>
     </div>`;
   renderTopbar();
   const mob = items.slice(0, 4);
