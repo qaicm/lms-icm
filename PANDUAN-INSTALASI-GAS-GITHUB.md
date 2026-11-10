@@ -446,12 +446,18 @@ Minggu efektif term  ×  period per minggu (mapel × kelas)  =  anggaran period 
 
 **3. Guru membuat Lesson Plan — satu LP per chapter** (4 chapter = 4 LP per term):
 - Langkah 1 memilih chapter (chapter yang sudah punya LP tidak bisa dipilih lagi).
-- Langkah 2 menampilkan TP chapter (hanya baca, dikelompokkan per sub-bab) + ICM Value + Sequence. Pemilihan TP dilakukan per pertemuan di langkah 4.
-- Langkah 3 Diferensiasi — dari 9 kotak matriks guru hanya bisa memilih **satu**; memilih kotak lain menggantikan pilihan sebelumnya.
-- Langkah 4 **Pertemuan**: tiap pertemuan berdurasi **1 Period (40 menit)** atau **2 Period (80 menit)**, dengan tanggal (opsional) dan skenario **Pendahuluan–Inti–Penutup**. Di tiap pertemuan guru **mencentang TP** yang diajarkan (daftar TP diambil dari Analisis Chapter, dikelompokkan per sub-bab); **sub-bab terisi otomatis** mengikuti TP yang dicentang. Satu TP boleh dicentang di lebih dari satu pertemuan. Tombol *Susun otomatis* membagi TP ke pertemuan sesuai period chapter.
+- Langkah 2 menampilkan TP chapter (hanya baca, dikelompokkan per sub-bab).
+- Langkah 3 berisi **Essential Question saja** — hanya **satu per chapter** (wajib).
+- Langkah 4 **Pertemuan**: tiap pertemuan berdurasi **1 Period (40 menit)** atau **2 Period (80 menit)** dan berisi:
+  1. **TP yang diajarkan** — guru mencentang TP (dikelompokkan per sub-bab); **sub-bab terisi otomatis**. Satu TP boleh dicentang di beberapa pertemuan.
+  2. **Learning Indicator (Micro TP)** — **terisi otomatis dari TP yang dicentang** di pertemuan itu. Guru bisa menambah indikator sendiri lewat tombol *Tambah indikator manual* (di luar TP yang sudah dibuat di Analisis Chapter) dan menghapusnya kembali.
+  3. **ICM Value** (minimal satu), **Sequence of Teaching** (minimal satu) dan **Terminology & Trigger Question** — **wajib** di setiap pertemuan, walaupun hanya satu isian.
+  4. **Diferensiasi** (matriks 3×3) — **satu-satunya yang boleh dikosongkan**; bila diisi, hanya **satu dari 9 kotak** (aturan bawaan).
+  5. Skenario **Pendahuluan–Inti–Penutup** beserta durasinya.
+  Tombol *Susun otomatis* membagi TP ke pertemuan sesuai period chapter.
 - **Setiap TP chapter harus masuk ke minimal satu pertemuan.** Bila masih ada TP yang belum terpetakan, ringkasan menampilkan daftarnya dan lesson plan **tidak bisa dikirim**.
 - **Total period semua pertemuan harus sama dengan period chapter** dan durasi skenario tiap pertemuan tidak boleh melebihi alokasinya, kalau tidak LP tidak bisa dikirim.
-- PDF resmi memuat bagian *Rencana Pertemuan* lengkap dengan alokasi, topik, dan daftar TP tiap pertemuan.
+- PDF resmi memuat bagian *Rencana Pertemuan* lengkap dengan alokasi, topik, TP, Learning Indicator (Micro TP), ICM, Sequence, Terminology & Trigger Question, dan Diferensiasi tiap pertemuan.
 
 ### F4. Memasang pembaruan ini di instalasi yang sudah berjalan
 

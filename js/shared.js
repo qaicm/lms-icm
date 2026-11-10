@@ -68,37 +68,28 @@ function renderLpDoc(d, o) {
 
   h += sec(1, 'Capaian & Tujuan Pembelajaran');
   h += (d.los || []).map(function (l) { return '<table style="width:100%;border-collapse:collapse;margin-bottom:6px"><tr><td style="width:64px;vertical-align:top"><span style="display:inline-block;padding:2px 8px;border-radius:6px;background:#EDE9FB;color:' + pri + ';font-size:11px;font-weight:bold">' + E(l.kode) + '</span></td><td style="vertical-align:top">' + sanitizeRich(l.teks) + (l.sub ? '<div style="font-size:10.5px;color:' + mute + '">Sub-bab ' + E(l.sub) + '</div>' : '') + '</td></tr></table>'; }).join('') || '<div style="color:' + mute + '">—</div>';
-  h += '<div style="margin-top:8px;padding:10px 12px;border-left:3px solid #6B5FD6;background:' + tint + ';border-radius:0 8px 8px 0"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">ATP / Micro LO</div>' + nl(d.atp || '—') + '</div>';
 
-  h += sec(2, 'Nilai Karakter ICM & Sequence of Teaching');
-  h += '<table style="width:100%;border-collapse:collapse"><tr><td style="width:50%;vertical-align:top;padding-right:10px"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">ICM Value</div>' + ((d.icm || []).map(function (x) { return chip(x, '#EDE9FB', pri); }).join('') || '—') + '</td>' +
-    '<td style="width:50%;vertical-align:top"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Sequence of Teaching</div>' + ((d.seq || []).map(function (x, i) { return chip((i + 1) + '. ' + x, '#E3F0FC', '#00629d'); }).join('') || '—') + '</td></tr></table>';
+  h += sec(2, 'Pertanyaan Esensial');
+  h += '<div style="padding:10px 12px;border-left:3px solid #F2A93B;background:' + tint + ';border-radius:0 8px 8px 0"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">Essential Question (chapter)</div>' + nl(d.eq || '—') + '</div>';
 
-  h += sec(3, 'Matriks Pembelajaran Berdiferensiasi');
-  const groups = {}; (d.diff || []).forEach(function (x) { (groups[x.a] = groups[x.a] || []).push(x); });
-  const aspects = Object.keys(groups);
-  h += aspects.length ? '<table style="width:100%;border-collapse:separate;border-spacing:8px 0;margin:0 -8px"><tr>' + aspects.map(function (a) {
-    return '<td style="vertical-align:top;background:' + tint + ';border-radius:10px;padding:10px 12px;width:' + Math.floor(100 / aspects.length) + '%"><div style="font-size:11px;font-weight:bold;color:' + pri + ';text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Diferensiasi ' + E(a) + '</div>' +
-      groups[a].map(function (x) { return '<div style="font-size:11.5px;margin-bottom:4px"><b>' + E(x.p) + '</b>' + (x.note ? ': ' + E(x.note) : '') + '</div>'; }).join('') + '</td>';
-  }).join('') + '</tr></table>' : '<div style="color:' + mute + '">—</div>';
-
-  h += sec(4, 'Pertanyaan Esensial & Terminologi');
-  h += '<table style="width:100%;border-collapse:collapse"><tr><td style="width:50%;vertical-align:top;padding-right:10px"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">Essential Question</div>' + nl(d.eq || '—') + '</td>' +
-    '<td style="width:50%;vertical-align:top"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">Terminology & Trigger Question</div>' + nl(d.terminology || '—') + '</td></tr></table>';
-
-  h += sec(5, 'Rencana Pertemuan (' + ses.length + ' Pertemuan · ' + totP + ' Period)');
+  h += sec(3, 'Rencana Pertemuan (' + ses.length + ' Pertemuan · ' + totP + ' Period)');
   const col = { A: '#5BA4E6', B: '#6B5FD6', C: '#F2A93B' };
   h += ses.map(function (x) {
     return '<table class="lp-ses" style="width:100%;border-collapse:collapse;margin-bottom:12px;border:1px solid ' + line + ';border-radius:10px"><tr><td style="padding:10px 12px;background:' + tint + ';border-radius:10px 10px 0 0">' +
       '<table style="width:100%;border-collapse:collapse"><tr><td style="font-weight:bold;font-size:13px">Pertemuan ' + E(x.no) + (x.tanggal ? ' <span style="font-weight:normal;color:' + mute + ';font-size:11px">· ' + E(fmtTanggal(x.tanggal)) + '</span>' : '') + '</td><td style="text-align:right"><span style="padding:2px 8px;border-radius:999px;background:#EDE9FB;color:' + pri + ';font-size:11px;font-weight:bold">' + E(x.alokasi || (x.menit + ' menit')) + '</span></td></tr></table>' +
       ((x.topik || []).length ? '<div style="font-size:11px;color:' + mute + ';margin-top:2px">Topik: ' + E(x.topik.join(' · ')) + '</div>' : '') +
-      ((x.tps || []).length ? '<div style="font-size:11px;color:' + mute + ';margin-top:2px">TP: ' + E(x.tps.join(', ')) + '</div>' : '') + '</td></tr>' +
+      ((x.tps || []).length ? '<div style="font-size:11px;color:' + mute + ';margin-top:2px">TP: ' + E(x.tps.join(', ')) + '</div>' : '') +
+      (x.indikator ? '<div style="margin-top:8px"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">Learning Indicator (Micro TP)</div><div style="font-size:12px">' + nl(x.indikator) + '</div></div>' : '') +
+      (x.terminology ? '<div style="margin-top:6px"><div style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">Terminology & Trigger Question</div><div style="font-size:12px">' + nl(x.terminology) + '</div></div>' : '') +
+      ((x.icm || []).length ? '<div style="margin-top:6px"><span style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">ICM Value </span>' + x.icm.map(function (v) { return chip(v, '#EDE9FB', pri); }).join('') + '</div>' : '') +
+      ((x.seq || []).length ? '<div style="margin-top:4px"><span style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">Sequence </span>' + x.seq.map(function (v, k) { return chip((k + 1) + '. ' + v, '#E3F0FC', '#00629d'); }).join('') + '</div>' : '') +
+      ((x.diff || []).length ? '<div style="margin-top:4px;font-size:11.5px"><span style="font-size:10px;color:' + mute + ';text-transform:uppercase;letter-spacing:.06em">Diferensiasi </span>' + x.diff.map(function (v) { return '<b>' + E(v.a) + ' · ' + E(v.p) + '</b>' + (v.note ? ': ' + E(v.note) : ''); }).join('; ') + '</div>' : '') + '</td></tr>' +
       (x.scen || []).map(function (sc) {
         return '<tr><td style="padding:6px 12px 6px 10px;border-left:3px solid ' + col[sc.key] + '"><table style="width:100%;border-collapse:collapse"><tr><td style="font-weight:bold;font-size:12px">' + E(sc.key + '. ' + sc.label) + '</td><td style="text-align:right;font-size:11px;color:' + mute + '">' + E(sc.menit) + ' menit</td></tr></table><div>' + nl(sc.desc || '—') + '</div></td></tr>';
       }).join('') + '</table>';
   }).join('') || '<div style="color:' + mute + '">—</div>';
 
-  h += sec(6, 'Lampiran Pendukung');
+  h += sec(4, 'Lampiran Pendukung');
   h += (d.attachments || []).length ? '<ul style="margin:0;padding-left:18px">' + d.attachments.map(function (a) { return '<li>' + E(a) + '</li>'; }).join('') + '</ul>' : '<div style="color:' + mute + '">Tidak ada lampiran.</div>';
 
   h += '<table style="width:100%;border-collapse:collapse;margin-top:28px;background:' + tint + ';border-radius:12px"><tr>' +

@@ -750,3 +750,22 @@ textarea.form-control { min-height: 110px; resize: vertical; line-height: 1.55; 
 .tp-opt.on { border-color: var(--primary); background: var(--primary-soft, rgba(107,95,214,.1)); }
 .tp-opt.on .ck { background: var(--primary); border-color: var(--primary); }
 .tp-opt b { color: var(--primary-strong); margin-right: 4px; }
+
+.atp-help { display: flex; gap: 14px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; padding: 10px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--primary-soft, rgba(107,95,214,.08)); font-size: .84rem; line-height: 1.5; }
+.atp-help > div { flex: 1 1 320px; min-width: 0; }
+.atp-help .btn { flex: 0 0 auto; }
+
+/* Diferensiasi 3×3 per pertemuan */
+.sdiff { display: grid; grid-template-columns: minmax(70px, 110px) repeat(3, 1fr); gap: 6px; align-items: center; max-width: 560px; }
+.sdiff .sd-h { font-size: .74rem; font-weight: 700; color: var(--text-3); text-align: center; }
+.sdiff .sd-r { font-size: .82rem; font-weight: 700; color: var(--text-2); }
+.sdiff .sd-c { min-height: 44px; border-radius: 10px; border: 1.5px solid var(--border); background: var(--surface-pure); color: #fff; display: inline-flex; align-items: center; justify-content: center; transition: all .15s var(--ease); }
+.sdiff .sd-c:hover { border-color: var(--primary); }
+.sdiff .sd-c.on { background: var(--primary); border-color: var(--primary); }
+.chipcard.sm { min-height: 40px; padding: 6px 12px; font-size: .8rem; }
+/* Learning Indicator (Micro TP) per pertemuan */
+.ind-list{display:flex;flex-direction:column;gap:6px;border:1px solid var(--line,#E6E1F5);border-radius:12px;padding:8px;background:var(--surface-2,#FAF8FF)}
+.ind-row{display:flex;gap:8px;align-items:flex-start;font-size:.88rem;line-height:1.45}
+.ind-row .chip{flex:none;margin-top:1px}
+.ind-row.manual{align-items:center}
+.ind-row.manual .form-control{flex:1 1 auto;min-width:0}
